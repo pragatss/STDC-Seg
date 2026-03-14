@@ -22,6 +22,7 @@ from loss.loss import OhemCELoss              # Segmentation loss (OHEM cross-en
 from loss.detail_loss import DetailAggregateLoss  # Boundary loss (Paper §3.3)
 from evaluation import MscEvalV0              # mIOU evaluator
 from optimizer_loss import Optimizer          # SGD with warmup + poly LR decay (Paper §4)
+from ZeroPlane.third_party.dust3r.croco.stereoflow.criterion import LaplacianLossBounded2
 
 import torch
 import torch.nn as nn
@@ -341,6 +342,7 @@ def train():
     #          number of edge pixels vs. the large number of non-edge pixels.
     # ---------------------------------------------------------------
     boundary_loss_func = DetailAggregateLoss()
+    plane_loss_func = LaplacianLossBounded2(max_gtnorm=None)
     # ---------------------------------------------------------------
     # Optimiser: SGD with Warmup + Polynomial LR Decay (Paper §4)
     #
@@ -501,7 +503,7 @@ def train():
             boundery_bce_loss += boundery_bce_loss8
             boundery_dice_loss += boundery_dice_loss8
 
-        # TRY TO USE LOSS FROM ZEROPLANE HEADS - REUSE THEIR LOSS
+        # Plane auxiliary soft-target loss from dust3r criterion
         plane_aux_loss = torch.tensor(0.0, device=im.device)
         if use_plane_aux and plane_aux_out is not None and plane_aux_soft_target is not None:
             plane_aux_soft_target = plane_aux_soft_target.detach()
@@ -515,10 +517,12 @@ def train():
             plane_aux_soft_target = torch.clamp(plane_aux_soft_target, min=0.0, max=1.0)
             valid_mask = (lb != ignore_idx).unsqueeze(1)
             if valid_mask.any():
-                plane_aux_loss = F.binary_cross_entropy_with_logits(
-                    plane_aux_out[valid_mask],
-                    plane_aux_soft_target[valid_mask],
-                )
+                gt_for_lap = plane_aux_soft_target.clone()
+                gt_for_lap[~valid_mask] = float('nan')
+
+                pred_for_lap = torch.sigmoid(plane_aux_out)
+                conf_for_lap = plane_aux_out
+                plane_aux_loss = plane_loss_func(pred_for_lap, gt_for_lap, conf_for_lap)
 
         # ---------------------------------------------------------------
         # Total loss = segmentation losses + boundary losses (Paper Eq. 3 / §4)
