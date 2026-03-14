@@ -49,6 +49,14 @@ def str2bool(v):
 
 def parse_args():
     parse = argparse.ArgumentParser()
+    
+    parse.add_argument(
+        '---usePlanarHead',
+        dest='usePlanarHead',
+        type = str2bool,
+        default = False
+    )
+    
     parse.add_argument(
             '--local_rank',
             dest = 'local_rank',
