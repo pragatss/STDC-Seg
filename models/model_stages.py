@@ -113,6 +113,113 @@ class BiSeNetOutput(nn.Module):
                 nowd_params += list(module.parameters())
         return wd_params, nowd_params
 
+
+class PlaneAuxHead(nn.Module):
+    def __init__(self, in_chan, mid_chan=64, zeroplane_model=None, zeroplane_soft_target_fn=None, *args, **kwargs):
+        super(PlaneAuxHead, self).__init__()
+        self.pred_head = BiSeNetOutput(in_chan, mid_chan, 1)
+        self.zeroplane_model = zeroplane_model
+        self.zeroplane_soft_target_fn = zeroplane_soft_target_fn
+
+        if isinstance(self.zeroplane_model, nn.Module):
+            self.zeroplane_model.eval()
+            for param in self.zeroplane_model.parameters():
+                param.requires_grad = False
+    
+    # UNSURE OUTPUT, need to determine ouput format and update this function accordingly
+    def _extract_plane_prob_from_zeroplane_output(self, outputs):
+        if outputs is None:
+            return None
+
+        if torch.is_tensor(outputs):
+            plane = outputs
+            if plane.ndim == 3:
+                plane = plane.unsqueeze(1)
+            if plane.ndim == 4 and plane.size(1) > 1:
+                plane = plane[:, :1]
+            return plane
+
+        if isinstance(outputs, dict):
+            outputs = [outputs]
+
+        if not isinstance(outputs, (list, tuple)):
+            return None
+
+        plane_maps = []
+        for item in outputs:
+            if not isinstance(item, dict):
+                continue
+
+            sem_seg = item.get('sem_seg', None)
+            if sem_seg is None or (not torch.is_tensor(sem_seg)):
+                continue
+
+            if sem_seg.ndim == 2:
+                plane_map = sem_seg
+            elif sem_seg.ndim == 3:
+                if sem_seg.size(0) > 1:
+                    plane_map = sem_seg[:-1].max(dim=0).values
+                else:
+                    plane_map = sem_seg[0]
+            else:
+                continue
+
+            plane_maps.append(plane_map.unsqueeze(0))
+
+        if len(plane_maps) == 0:
+            return None
+
+        plane = torch.stack(plane_maps, dim=0)
+        return plane
+
+    def _predict_zeroplane_soft_target(self, image=None, zeroplane_inputs=None, pred_logits=None):
+        if self.zeroplane_soft_target_fn is not None:
+            return self.zeroplane_soft_target_fn(
+                image=image,
+                zeroplane_inputs=zeroplane_inputs,
+                pred_logits=pred_logits,
+            )
+
+        if self.zeroplane_model is None:
+            return None
+
+        model_inputs = zeroplane_inputs
+        if model_inputs is None and torch.is_tensor(image):
+            model_inputs = [{"image": img} for img in image]
+
+        if model_inputs is None:
+            return None
+
+        return self.zeroplane_model(model_inputs)
+
+    def forward(self, feat, image=None, zeroplane_inputs=None):
+        pred_logits = self.pred_head(feat)
+        soft_target = None
+
+        with torch.no_grad():
+            zeroplane_raw = self._predict_zeroplane_soft_target(
+                image=image,
+                zeroplane_inputs=zeroplane_inputs,
+                pred_logits=pred_logits,
+            )
+            soft_target = self._extract_plane_prob_from_zeroplane_output(zeroplane_raw)
+
+            if soft_target is not None:
+                soft_target = soft_target.to(pred_logits.device, dtype=pred_logits.dtype)
+                if soft_target.shape[-2:] != pred_logits.shape[-2:]:
+                    soft_target = F.interpolate(
+                        soft_target,
+                        size=pred_logits.shape[-2:],
+                        mode='bilinear',
+                        align_corners=True,
+                    )
+                soft_target = torch.clamp(soft_target, 0.0, 1.0)
+
+        return pred_logits, soft_target
+
+    def get_params(self):
+        return self.pred_head.get_params()
+
 class ContextPath(nn.Module):
     """
     Context Path — Paper §3.2 / Fig. 4.
@@ -324,13 +431,15 @@ class  BiSeNet(nn.Module):
                                   At inference these are simply not called, so
                                   there is ZERO extra runtime cost (Paper §3.3).
     """
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_plane_aux=False, plane_aux_tap='fuse', plane_aux_mid=64, zeroplane_model=None, zeroplane_soft_target_fn=None, *args, **kwargs):
         super(BiSeNet, self).__init__()
         
         self.use_boundary_2 = use_boundary_2
         self.use_boundary_4 = use_boundary_4
         self.use_boundary_8 = use_boundary_8
         self.use_boundary_16 = use_boundary_16
+        self.use_plane_aux = use_plane_aux
+        self.plane_aux_tap = plane_aux_tap
         # self.heat_map = heat_map
         self.cp = ContextPath(backbone, pretrain_model, use_conv_last=use_conv_last)
             
@@ -375,9 +484,30 @@ class  BiSeNet(nn.Module):
         self.conv_out_sp8 = BiSeNetOutput(sp8_inplanes, 64, 1)
         self.conv_out_sp4 = BiSeNetOutput(sp4_inplanes, 64, 1)
         self.conv_out_sp2 = BiSeNetOutput(sp2_inplanes, 64, 1)
+
+        if self.use_plane_aux:
+            plane_inplanes_map = {
+                'fuse': 256,
+                'cp8': conv_out_inplanes,
+                'cp16': conv_out_inplanes,
+                'res8': sp8_inplanes,
+                'res16': sp16_inplanes,
+            }
+            if self.plane_aux_tap not in plane_inplanes_map:
+                raise ValueError('Unsupported plane_aux_tap {}. Choose from {}'.format(
+                    self.plane_aux_tap, list(plane_inplanes_map.keys())
+                ))
+
+            self.plane_aux_head = PlaneAuxHead(
+                plane_inplanes_map[self.plane_aux_tap],
+                mid_chan=plane_aux_mid,
+                zeroplane_model=zeroplane_model,
+                zeroplane_soft_target_fn=zeroplane_soft_target_fn,
+            )
+
         self.init_weight()
 
-    def forward(self, x):
+    def forward(self, x, zeroplane_inputs=None):
         H, W = x.size()[2:]
         
         # ContextPath returns STDC backbone stages (feat_res*) and refined context (feat_cp*)
@@ -407,19 +537,55 @@ class  BiSeNet(nn.Module):
         feat_out16 = F.interpolate(feat_out16, (H, W), mode='bilinear', align_corners=True)
         feat_out32 = F.interpolate(feat_out32, (H, W), mode='bilinear', align_corners=True)
 
+        plane_aux_logits = None
+        plane_aux_soft_target = None
+        if self.use_plane_aux:
+            if self.plane_aux_tap == 'fuse':
+                plane_feat = feat_fuse
+            elif self.plane_aux_tap == 'cp8':
+                plane_feat = feat_cp8
+            elif self.plane_aux_tap == 'cp16':
+                plane_feat = feat_cp16
+            elif self.plane_aux_tap == 'res8':
+                plane_feat = feat_res8
+            else:
+                plane_feat = feat_res16
+
+            plane_aux_logits, plane_aux_soft_target = self.plane_aux_head(
+                plane_feat,
+                image=x,
+                zeroplane_inputs=zeroplane_inputs,
+            )
+            plane_aux_logits = F.interpolate(plane_aux_logits, (H, W), mode='bilinear', align_corners=True)
+            if plane_aux_soft_target is not None and plane_aux_soft_target.shape[-2:] != (H, W):
+                plane_aux_soft_target = F.interpolate(
+                    plane_aux_soft_target,
+                    (H, W),
+                    mode='bilinear',
+                    align_corners=True,
+                )
+
 
         # Return segmentation outputs + boundary outputs selected by training flags.
         # At inference only feat_out (the primary head) is used; boundary heads are dropped.
         if self.use_boundary_2 and self.use_boundary_4 and self.use_boundary_8:
+            if self.use_plane_aux:
+                return feat_out, feat_out16, feat_out32, feat_out_sp2, feat_out_sp4, feat_out_sp8, plane_aux_logits, plane_aux_soft_target
             return feat_out, feat_out16, feat_out32, feat_out_sp2, feat_out_sp4, feat_out_sp8
         
         if (not self.use_boundary_2) and self.use_boundary_4 and self.use_boundary_8:
+            if self.use_plane_aux:
+                return feat_out, feat_out16, feat_out32, feat_out_sp4, feat_out_sp8, plane_aux_logits, plane_aux_soft_target
             return feat_out, feat_out16, feat_out32, feat_out_sp4, feat_out_sp8
 
         if (not self.use_boundary_2) and (not self.use_boundary_4) and self.use_boundary_8:
+            if self.use_plane_aux:
+                return feat_out, feat_out16, feat_out32, feat_out_sp8, plane_aux_logits, plane_aux_soft_target
             return feat_out, feat_out16, feat_out32, feat_out_sp8
         
         if (not self.use_boundary_2) and (not self.use_boundary_4) and (not self.use_boundary_8):
+            if self.use_plane_aux:
+                return feat_out, feat_out16, feat_out32, plane_aux_logits, plane_aux_soft_target
             return feat_out, feat_out16, feat_out32
 
     def init_weight(self):
@@ -432,7 +598,7 @@ class  BiSeNet(nn.Module):
         wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params = [], [], [], []
         for name, child in self.named_children():
             child_wd_params, child_nowd_params = child.get_params()
-            if isinstance(child, (FeatureFusionModule, BiSeNetOutput)):
+            if isinstance(child, (FeatureFusionModule, BiSeNetOutput, PlaneAuxHead)):
                 lr_mul_wd_params += child_wd_params
                 lr_mul_nowd_params += child_nowd_params
             else:
