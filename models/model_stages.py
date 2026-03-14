@@ -126,18 +126,19 @@ class PlaneAuxHead(nn.Module):
             for param in self.zeroplane_model.parameters():
                 param.requires_grad = False
     
-    # UNSURE OUTPUT, need to determine ouput format and update this function accordingly
     def _extract_plane_prob_from_zeroplane_output(self, outputs):
         if outputs is None:
             return None
 
         if torch.is_tensor(outputs):
-            plane = outputs
-            if plane.ndim == 3:
+            plane = outputs.float()
+            if plane.ndim == 2:
+                plane = plane.unsqueeze(0).unsqueeze(0)
+            elif plane.ndim == 3:
                 plane = plane.unsqueeze(1)
-            if plane.ndim == 4 and plane.size(1) > 1:
+            elif plane.ndim == 4 and plane.size(1) > 1:
                 plane = plane[:, :1]
-            return plane
+            return torch.clamp(plane, 0.0, 1.0)
 
         if isinstance(outputs, dict):
             outputs = [outputs]
@@ -154,17 +155,27 @@ class PlaneAuxHead(nn.Module):
             if sem_seg is None or (not torch.is_tensor(sem_seg)):
                 continue
 
+            sem_seg = sem_seg.float()
             if sem_seg.ndim == 2:
                 plane_map = sem_seg
             elif sem_seg.ndim == 3:
                 if sem_seg.size(0) > 1:
-                    plane_map = sem_seg[:-1].max(dim=0).values
+                    # ZeroPlane demo uses predictions["sem_seg"].argmax(dim=0), where sem_seg
+                    # is [num_queries, H, W] and last channel is the synthesized non-plane map.
+                    # For binary plane supervision, use robust plane probability as the stronger
+                    # signal between:
+                    #   (1) 1 - P(non-plane)
+                    #   (2) max over all plane channels
+                    non_plane = sem_seg[-1]
+                    plane_from_non_plane = 1.0 - non_plane
+                    plane_from_planes = sem_seg[:-1].max(dim=0).values
+                    plane_map = torch.max(plane_from_non_plane, plane_from_planes)
                 else:
                     plane_map = sem_seg[0]
             else:
                 continue
 
-            plane_maps.append(plane_map.unsqueeze(0))
+            plane_maps.append(torch.clamp(plane_map, 0.0, 1.0).unsqueeze(0))
 
         if len(plane_maps) == 0:
             return None

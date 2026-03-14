@@ -51,10 +51,34 @@ def parse_args():
     parse = argparse.ArgumentParser()
     
     parse.add_argument(
-        '---usePlanarHead',
-        dest='usePlanarHead',
+        '--use_plane_aux',
+        dest='use_plane_aux',
         type = str2bool,
         default = False
+    )
+    parse.add_argument(
+        '--usePlanarHead',
+        dest='use_plane_aux',
+        type = str2bool,
+        default = False
+    )
+    parse.add_argument(
+        '--plane_loss_weight',
+        dest='plane_loss_weight',
+        type=float,
+        default=1.0,
+    )
+    parse.add_argument(
+        '--plane_aux_tap',
+        dest='plane_aux_tap',
+        type=str,
+        default='fuse',
+    )
+    parse.add_argument(
+        '--plane_aux_mid',
+        dest='plane_aux_mid',
+        type=int,
+        default=64,
     )
     
     parse.add_argument(
@@ -209,6 +233,7 @@ def train():
     use_boundary_8 = args.use_boundary_8
     use_boundary_4 = args.use_boundary_4
     use_boundary_2 = args.use_boundary_2
+    use_plane_aux = args.use_plane_aux
     
     mode = args.mode
 
@@ -228,6 +253,10 @@ def train():
         logger.info('use_boundary_4: {}'.format(use_boundary_4))
         logger.info('use_boundary_8: {}'.format(use_boundary_8))
         logger.info('use_boundary_16: {}'.format(use_boundary_16))
+        logger.info('use_plane_aux: {}'.format(use_plane_aux))
+        logger.info('plane_aux_tap: {}'.format(args.plane_aux_tap))
+        logger.info('plane_aux_mid: {}'.format(args.plane_aux_mid))
+        logger.info('plane_loss_weight: {}'.format(args.plane_loss_weight))
         logger.info('mode: {}'.format(args.mode))
     
     
@@ -262,7 +291,8 @@ def train():
     ignore_idx = 255  # Cityscapes uses label 255 for "don't care" pixels — we ignore them in the loss
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
-    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last)
+    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
+    use_plane_aux=use_plane_aux, plane_aux_tap=args.plane_aux_tap, plane_aux_mid=args.plane_aux_mid)
 
     if not args.ckpt is None:
         # Resume training from a previously saved checkpoint
@@ -365,6 +395,7 @@ def train():
     loss_avg = []
     loss_boundery_bce = []
     loss_boundery_dice = []
+    loss_plane_aux = []
     st = glob_st = time.time()
     diter = iter(dl)
     epoch = 0
@@ -397,17 +428,33 @@ def train():
         # These boundary maps are ONLY used to compute the boundary loss below;
         # they do not feed into the final segmentation output (Paper §3.3).
         # ---------------------------------------------------------------
+        net_out = net(im)
+        plane_aux_out = None
+        plane_aux_soft_target = None
+
         if use_boundary_2 and use_boundary_4 and use_boundary_8:
-            out, out16, out32, detail2, detail4, detail8 = net(im)
+            if use_plane_aux:
+                out, out16, out32, detail2, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32, detail2, detail4, detail8 = net_out
         
         if (not use_boundary_2) and use_boundary_4 and use_boundary_8:
-            out, out16, out32, detail4, detail8 = net(im)
+            if use_plane_aux:
+                out, out16, out32, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32, detail4, detail8 = net_out
 
         if (not use_boundary_2) and (not use_boundary_4) and use_boundary_8:
-            out, out16, out32, detail8 = net(im)
+            if use_plane_aux:
+                out, out16, out32, detail8, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32, detail8 = net_out
 
         if (not use_boundary_2) and (not use_boundary_4) and (not use_boundary_8):
-            out, out16, out32 = net(im)
+            if use_plane_aux:
+                out, out16, out32, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32 = net_out
 
         # ---------------------------------------------------------------
         # Segmentation loss — "how wrong were we at labelling each pixel?"
@@ -454,6 +501,25 @@ def train():
             boundery_bce_loss += boundery_bce_loss8
             boundery_dice_loss += boundery_dice_loss8
 
+        # TRY TO USE LOSS FROM ZEROPLANE HEADS - REUSE THEIR LOSS
+        plane_aux_loss = torch.tensor(0.0, device=im.device)
+        if use_plane_aux and plane_aux_out is not None and plane_aux_soft_target is not None:
+            plane_aux_soft_target = plane_aux_soft_target.detach()
+            if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
+                plane_aux_soft_target = F.interpolate(
+                    plane_aux_soft_target,
+                    size=plane_aux_out.shape[-2:],
+                    mode='bilinear',
+                    align_corners=True,
+                )
+            plane_aux_soft_target = torch.clamp(plane_aux_soft_target, min=0.0, max=1.0)
+            valid_mask = (lb != ignore_idx).unsqueeze(1)
+            if valid_mask.any():
+                plane_aux_loss = F.binary_cross_entropy_with_logits(
+                    plane_aux_out[valid_mask],
+                    plane_aux_soft_target[valid_mask],
+                )
+
         # ---------------------------------------------------------------
         # Total loss = segmentation losses + boundary losses (Paper Eq. 3 / §4)
         #
@@ -465,6 +531,8 @@ def train():
         # the boundary heads are not called so there is zero extra cost.
         # ---------------------------------------------------------------
         loss = lossp + loss2 + loss3 + boundery_bce_loss + boundery_dice_loss
+        if use_plane_aux:
+            loss = loss + args.plane_loss_weight * plane_aux_loss
         
         loss.backward()   # compute gradients via backpropagation
         optim.step()      # update all weights (network + fuse_kernel)
@@ -473,6 +541,8 @@ def train():
 
         loss_boundery_bce.append(boundery_bce_loss.item())
         loss_boundery_dice.append(boundery_dice_loss.item())
+        if use_plane_aux:
+            loss_plane_aux.append(plane_aux_loss.item())
 
         ## print training log message
         if (it+1)%msg_iter==0:
@@ -485,7 +555,7 @@ def train():
 
             loss_boundery_bce_avg = sum(loss_boundery_bce) / len(loss_boundery_bce)
             loss_boundery_dice_avg = sum(loss_boundery_dice) / len(loss_boundery_dice)
-            msg = ', '.join([
+            msg_items = [
                 'it: {it}/{max_it}',
                 'lr: {lr:4f}',
                 'loss: {loss:.4f}',
@@ -493,13 +563,17 @@ def train():
                 'boundery_dice_loss: {boundery_dice_loss:.4f}',
                 'eta: {eta}',
                 'time: {time:.4f}',
-            ]).format(
+            ]
+            if use_plane_aux:
+                msg_items.insert(5, 'plane_aux_loss: {plane_aux_loss:.4f}')
+            msg = ', '.join(msg_items).format(
                 it = it+1,
                 max_it = max_iter,
                 lr = lr,
                 loss = loss_avg,
                 boundery_bce_loss = loss_boundery_bce_avg,
                 boundery_dice_loss = loss_boundery_dice_avg,
+                plane_aux_loss = (sum(loss_plane_aux) / len(loss_plane_aux)) if use_plane_aux and len(loss_plane_aux) > 0 else 0.0,
                 time = t_intv,
                 eta = eta
             )
@@ -508,6 +582,7 @@ def train():
             loss_avg = []
             loss_boundery_bce = []
             loss_boundery_dice = []
+            loss_plane_aux = []
             st = ed
             # print(boundary_loss_func.get_params())
         if (it+1)%save_iter_sep==0:# and it != 0:
