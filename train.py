@@ -506,14 +506,18 @@ def train():
         # Plane auxiliary soft-target loss from dust3r criterion
         plane_aux_loss = torch.tensor(0.0, device=im.device)
         if use_plane_aux and plane_aux_out is not None and plane_aux_soft_target is not None:
+            # detach gradient tracking
             plane_aux_soft_target = plane_aux_soft_target.detach()
             if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
+                # resize target by interpolation into aux out
                 plane_aux_soft_target = F.interpolate(
                     plane_aux_soft_target,
                     size=plane_aux_out.shape[-2:],
                     mode='bilinear',
                     align_corners=True,
                 )
+            
+            # keep values between 0 and 1     
             plane_aux_soft_target = torch.clamp(plane_aux_soft_target, min=0.0, max=1.0)
             valid_mask = (lb != ignore_idx).unsqueeze(1)
             if valid_mask.any():
