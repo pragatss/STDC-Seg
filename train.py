@@ -15,6 +15,21 @@
 #   4. Saves the best model based on mIOU (a standard accuracy metric).
 # ============================================================
 
+
+# ============================================================
+# STDC-Seg Training Script
+# Paper: "Rethinking BiSeNet for Real-Time Semantic Segmentation"
+#         Fan et al., CVPR 2021
+#
+# What this script does in plain English:
+#   1. Loads Cityscapes images (street scenes) with their pixel-level labels.
+#   2. Builds the STDC-Seg network (backbone + Context Path + FFM).
+#   3. Trains with two kinds of loss:
+#        a) Segmentation loss  -- "did we label each pixel correctly?"
+#        b) Boundary loss      -- "did we correctly find the edges between objects?"
+#   4. Saves the best model based on mIOU (a standard accuracy metric).
+# ============================================================
+
 from logger import setup_logger
 from models.model_stages import BiSeNet       # The full STDC-Seg network (Paper Fig. 4)
 from cityscapes import CityScapes             # Cityscapes dataset loader
@@ -201,6 +216,22 @@ def parse_args():
             type = str2bool,
             default = False,
             )
+    # -----------------------------------------------------------------
+    # Boundary supervision flags (Paper §3.3 — Detail Aggregation Learning)
+    #
+    # The paper's big idea: instead of keeping a whole separate "Detail Branch"
+    # running at inference time (which is slow), we teach the network about
+    # object edges ONLY during training using these boundary loss flags.
+    #
+    # Each flag turns on a boundary prediction head at a specific image scale:
+    #   use_boundary_2  → supervise edges at 1/2  of the original image size
+    #   use_boundary_4  → supervise edges at 1/4  of the original image size
+    #   use_boundary_8  → supervise edges at 1/8  of the original image size  ← most common
+    #   use_boundary_16 → supervise edges at 1/16 of the original image size
+    #
+    # At inference time these heads are simply not called — the network
+    # still benefits from the boundary-aware training without any extra cost.
+    # -----------------------------------------------------------------
     # -----------------------------------------------------------------
     # Boundary supervision flags (Paper §3.3 — Detail Aggregation Learning)
     #
@@ -445,11 +476,19 @@ def train():
     use_boundary_4 = args.use_boundary_4
     use_boundary_2 = args.use_boundary_2
     use_plane_aux = args.use_plane_aux
+    use_plane_aux = args.use_plane_aux
     
     mode = args.mode
 
     # Input images are cropped to 1024×512 during training (Paper §4 / Table 4 training settings)
+
+    # Input images are cropped to 1024×512 during training (Paper §4 / Table 4 training settings)
     cropsize = [1024, 512]
+
+    # Multi-scale random resizing for data augmentation (Paper §4).
+    # Think of it like showing the network the same scene from different distances —
+    # from very zoomed-out (12.5% of original size) to slightly zoomed-in (150%).
+    # This helps the model recognise objects at any size in the real world.
 
     # Multi-scale random resizing for data augmentation (Paper §4).
     # Think of it like showing the network the same scene from different distances —
@@ -464,6 +503,10 @@ def train():
         logger.info('use_boundary_4: {}'.format(use_boundary_4))
         logger.info('use_boundary_8: {}'.format(use_boundary_8))
         logger.info('use_boundary_16: {}'.format(use_boundary_16))
+        logger.info('use_plane_aux: {}'.format(use_plane_aux))
+        logger.info('plane_aux_tap: {}'.format(args.plane_aux_tap))
+        logger.info('plane_aux_mid: {}'.format(args.plane_aux_mid))
+        logger.info('plane_loss_weight: {}'.format(args.plane_loss_weight))
         logger.info('use_plane_aux: {}'.format(use_plane_aux))
         logger.info('plane_aux_tap: {}'.format(args.plane_aux_tap))
         logger.info('plane_aux_mid: {}'.format(args.plane_aux_mid))
@@ -529,9 +572,11 @@ def train():
 
     if not args.ckpt is None:
         # Resume training from a previously saved checkpoint
+        # Resume training from a previously saved checkpoint
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
     net.cuda()
     net.train()
+    # Spread training across multiple GPUs (one process per GPU)
     # Spread training across multiple GPUs (one process per GPU)
     net = nn.parallel.DistributedDataParallel(net,
             device_ids = [args.local_rank, ],
@@ -539,6 +584,24 @@ def train():
             find_unused_parameters=True
             )
 
+    # ---------------------------------------------------------------
+    # Segmentation loss: OHEM Cross-Entropy (Paper §4 training details)
+    #
+    # Standard cross-entropy asks "how wrong were we on every pixel?"
+    # OHEM (Online Hard Example Mining) goes further: it focuses training
+    # on the pixels the model is MOST confused about (confidence < 0.7),
+    # ignoring the easy pixels.  This forces the model to improve on
+    # tricky areas like thin objects or ambiguous boundaries.
+    #
+    # Three separate instances supervise the three segmentation outputs:
+    #   criteria_p  → main head (fused features at 1/8 scale, Paper §3.2)
+    #   criteria_16 → auxiliary head (Context Path output at 1/8, deep supervision)
+    #   criteria_32 → auxiliary head (Context Path output at 1/16, deep supervision)
+    # The two auxiliary heads are only used during training and help the
+    # network learn better intermediate representations (Paper §3.2).
+    # ---------------------------------------------------------------
+    score_thres = 0.7   # pixels where model confidence < 70% are considered "hard"
+    n_min = n_img_per_gpu*cropsize[0]*cropsize[1]//16  # minimum number of hard pixels per batch
     # ---------------------------------------------------------------
     # Segmentation loss: OHEM Cross-Entropy (Paper §4 training details)
     #
@@ -573,6 +636,19 @@ def train():
     #   Dice → overlap-based loss that handles the imbalance between the tiny
     #          number of edge pixels vs. the large number of non-edge pixels.
     # ---------------------------------------------------------------
+    
+    # ---------------------------------------------------------------
+    # Boundary loss: Detail Aggregation Loss (Paper §3.3)
+    #
+    # This loss teaches the network to correctly predict WHERE the edges
+    # between objects are.  It uses a Laplacian filter on the ground-truth
+    # masks to automatically figure out which pixels are on a boundary,
+    # then penalises the network if it misses those edges.
+    # It combines two loss terms:
+    #   BCE  → per-pixel binary classification (is this pixel a boundary or not?)
+    #   Dice → overlap-based loss that handles the imbalance between the tiny
+    #          number of edge pixels vs. the large number of non-edge pixels.
+    # ---------------------------------------------------------------
     boundary_loss_func = DetailAggregateLoss()
     # ---------------------------------------------------------------
     # Optimiser: SGD with Warmup + Polynomial LR Decay (Paper §4)
@@ -594,10 +670,13 @@ def train():
     momentum = 0.9
     weight_decay = 5e-4
     lr_start = 1e-2      # peak learning rate after warmup
+    lr_start = 1e-2      # peak learning rate after warmup
     max_iter = args.max_iter
     save_iter_sep = args.save_iter_sep
     power = 0.9          # controls how steeply the LR decays (polynomial exponent)
+    power = 0.9          # controls how steeply the LR decays (polynomial exponent)
     warmup_steps = args.warmup_steps
+    warmup_start_lr = 1e-5   # tiny LR at the very start of warmup
     warmup_start_lr = 1e-5   # tiny LR at the very start of warmup
 
     if dist.get_rank()==0: 
@@ -606,6 +685,7 @@ def train():
         print('warmup_steps: ', warmup_steps)
     optim = Optimizer(
             model = net.module,
+            loss = boundary_loss_func,   # include the learnable fuse_kernel in optimisation
             loss = boundary_loss_func,   # include the learnable fuse_kernel in optimisation
             lr0 = lr_start,
             momentum = momentum,
@@ -623,11 +703,20 @@ def train():
     #   3. Work out how to nudge each weight to reduce that error (backward pass).
     #   4. Update the weights (optimiser step).
     # ---------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # Main training loop (Paper §4)
+    # Each iteration:
+    #   1. Run a batch of images through the network (forward pass).
+    #   2. Compute how wrong the predictions were (loss).
+    #   3. Work out how to nudge each weight to reduce that error (backward pass).
+    #   4. Update the weights (optimiser step).
+    # ---------------------------------------------------------------
     ## train loop
     msg_iter = 50
     loss_avg = []
     loss_boundery_bce = []
     loss_boundery_dice = []
+    loss_plane_aux = []
     loss_plane_aux = []
     st = glob_st = time.time()
     diter = iter(dl)
@@ -664,8 +753,30 @@ def train():
         net_out = net(im)
         plane_aux_out = None
         plane_aux_soft_target = None
+        optim.zero_grad()  # clear gradients from the previous iteration
+
+        # ---------------------------------------------------------------
+        # Forward pass (Paper Fig. 4 — full STDC-Seg network)
+        #
+        # The network always returns three segmentation outputs:
+        #   out   → main prediction from the Feature Fusion Module (1/8 scale)
+        #   out16 → auxiliary prediction from Context Path (1/8 scale)
+        #   out32 → auxiliary prediction from Context Path (1/16 scale)
+        #
+        # If boundary supervision is enabled, it also returns raw boundary
+        # score maps (detail2/4/8) from the shallow STDC backbone stages.
+        # These boundary maps are ONLY used to compute the boundary loss below;
+        # they do not feed into the final segmentation output (Paper §3.3).
+        # ---------------------------------------------------------------
+        net_out = net(im)
+        plane_aux_out = None
+        plane_aux_soft_target = None
 
         if use_boundary_2 and use_boundary_4 and use_boundary_8:
+            if use_plane_aux:
+                out, out16, out32, detail2, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32, detail2, detail4, detail8 = net_out
             if use_plane_aux:
                 out, out16, out32, detail2, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
             else:
@@ -676,8 +787,16 @@ def train():
                 out, out16, out32, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
             else:
                 out, out16, out32, detail4, detail8 = net_out
+            if use_plane_aux:
+                out, out16, out32, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32, detail4, detail8 = net_out
 
         if (not use_boundary_2) and (not use_boundary_4) and use_boundary_8:
+            if use_plane_aux:
+                out, out16, out32, detail8, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32, detail8 = net_out
             if use_plane_aux:
                 out, out16, out32, detail8, plane_aux_out, plane_aux_soft_target = net_out
             else:
@@ -704,10 +823,41 @@ def train():
         lossp = criteria_p(out, lb)      # main segmentation head loss
         loss2 = criteria_16(out16, lb)   # auxiliary head at Context Path 1/8
         loss3 = criteria_32(out32, lb)   # auxiliary head at Context Path 1/16
+            if use_plane_aux:
+                out, out16, out32, plane_aux_out, plane_aux_soft_target = net_out
+            else:
+                out, out16, out32 = net_out
+
+        # ---------------------------------------------------------------
+        # Segmentation loss — "how wrong were we at labelling each pixel?"
+        # (OHEM cross-entropy, Paper §4 training details)
+        #
+        # lossp  → error on the main output (full fusion, most important)
+        # loss2  → error on the 1/8 auxiliary output  (deep supervision)
+        # loss3  → error on the 1/16 auxiliary output (deep supervision)
+        #
+        # Deep supervision means we penalise intermediate outputs too, not
+        # just the final one.  This pushes gradients deeper into the network
+        # and helps the backbone learn better features faster.
+        # ---------------------------------------------------------------
+        lossp = criteria_p(out, lb)      # main segmentation head loss
+        loss2 = criteria_16(out16, lb)   # auxiliary head at Context Path 1/8
+        loss3 = criteria_32(out32, lb)   # auxiliary head at Context Path 1/16
         
         boundery_bce_loss = 0.
         boundery_dice_loss = 0.
         
+        # ---------------------------------------------------------------
+        # Boundary loss — "did we correctly find the edges between objects?"
+        # (Detail Aggregation Learning, Paper §3.3 / Eq. 3)
+        #
+        # For each enabled scale we compare the network's boundary predictions
+        # (detail2/4/8) against automatically-generated GT edge maps.
+        # The GT edges are computed by running a Laplacian filter on the
+        # ground-truth segmentation mask (see DetailAggregateLoss in detail_loss.py).
+        #
+        # Accumulate BCE and Dice terms across all active scales.
+        # ---------------------------------------------------------------
         # ---------------------------------------------------------------
         # Boundary loss — "did we correctly find the edges between objects?"
         # (Detail Aggregation Learning, Paper §3.3 / Eq. 3)
@@ -778,7 +928,11 @@ def train():
         loss = lossp + loss2 + loss3 + boundery_bce_loss + boundery_dice_loss
         if use_plane_aux:
             loss = loss + args.plane_loss_weight * plane_aux_loss
+        if use_plane_aux:
+            loss = loss + args.plane_loss_weight * plane_aux_loss
         
+        loss.backward()   # compute gradients via backpropagation
+        optim.step()      # update all weights (network + fuse_kernel)
         loss.backward()   # compute gradients via backpropagation
         optim.step()      # update all weights (network + fuse_kernel)
 
@@ -786,6 +940,8 @@ def train():
 
         loss_boundery_bce.append(boundery_bce_loss.item())
         loss_boundery_dice.append(boundery_dice_loss.item())
+        if use_plane_aux:
+            loss_plane_aux.append(plane_aux_loss.item())
         if use_plane_aux:
             loss_plane_aux.append(plane_aux_loss.item())
 
@@ -801,6 +957,7 @@ def train():
             loss_boundery_bce_avg = sum(loss_boundery_bce) / len(loss_boundery_bce)
             loss_boundery_dice_avg = sum(loss_boundery_dice) / len(loss_boundery_dice)
             msg_items = [
+            msg_items = [
                 'it: {it}/{max_it}',
                 'lr: {lr:4f}',
                 'loss: {loss:.4f}',
@@ -812,12 +969,17 @@ def train():
             if use_plane_aux:
                 msg_items.insert(5, 'plane_aux_loss: {plane_aux_loss:.4f}')
             msg = ', '.join(msg_items).format(
+            ]
+            if use_plane_aux:
+                msg_items.insert(5, 'plane_aux_loss: {plane_aux_loss:.4f}')
+            msg = ', '.join(msg_items).format(
                 it = it+1,
                 max_it = max_iter,
                 lr = lr,
                 loss = loss_avg,
                 boundery_bce_loss = loss_boundery_bce_avg,
                 boundery_dice_loss = loss_boundery_dice_avg,
+                plane_aux_loss = (sum(loss_plane_aux) / len(loss_plane_aux)) if use_plane_aux and len(loss_plane_aux) > 0 else 0.0,
                 plane_aux_loss = (sum(loss_plane_aux) / len(loss_plane_aux)) if use_plane_aux and len(loss_plane_aux) > 0 else 0.0,
                 time = t_intv,
                 eta = eta
@@ -828,6 +990,7 @@ def train():
             loss_boundery_bce = []
             loss_boundery_dice = []
             loss_plane_aux = []
+            loss_plane_aux = []
             st = ed
             # print(boundary_loss_func.get_params())
         if (it+1)%save_iter_sep==0:# and it != 0:
@@ -836,6 +999,7 @@ def train():
             logger.info('evaluating the model ...')
             logger.info('setup and restore model')
             
+            # Switch off dropout and batch-norm running-stat updates during eval
             # Switch off dropout and batch-norm running-stat updates during eval
             net.eval()
 
@@ -851,11 +1015,26 @@ def train():
             #   mIOU75: evaluation at 75% of input resolution (scale=0.75)
             #           — tests how well the model generalises to smaller scales
             # ---------------------------------------------------------------
+            # ---------------------------------------------------------------
+            # Evaluation: compute mIOU on the validation set (Paper Table 4)
+            #
+            # mIOU (mean Intersection over Union) measures how well the
+            # predicted label mask overlaps the ground-truth mask, averaged
+            # across all 19 Cityscapes classes.  Higher = better.
+            #
+            # Two variants are measured:
+            #   mIOU50: standard evaluation at full resolution (scale=1.0)
+            #   mIOU75: evaluation at 75% of input resolution (scale=0.75)
+            #           — tests how well the model generalises to smaller scales
+            # ---------------------------------------------------------------
             logger.info('compute the mIOU')
+            with torch.no_grad():  # no gradients needed during evaluation
+                single_scale1 = MscEvalV0()            # full-resolution eval
             with torch.no_grad():  # no gradients needed during evaluation
                 single_scale1 = MscEvalV0()            # full-resolution eval
                 mIOU50 = single_scale1(net, dlval, n_classes)
 
+                single_scale2= MscEvalV0(scale=0.75)   # 75% resolution eval
                 single_scale2= MscEvalV0(scale=0.75)   # 75% resolution eval
                 mIOU75 = single_scale2(net, dlval, n_classes)
 
