@@ -123,6 +123,12 @@ def parse_args():
         default=64,
     )
     parse.add_argument(
+        '--plane_aux_soft_target_only_debug',
+        dest='plane_aux_soft_target_only_debug',
+        type=str2bool,
+        default=False,
+    )
+    parse.add_argument(
         '--local_rank',
         dest = 'local_rank',
         type = int,
@@ -445,6 +451,7 @@ def train():
     use_boundary_4 = args.use_boundary_4
     use_boundary_2 = args.use_boundary_2
     use_plane_aux = args.use_plane_aux
+    plane_aux_loss_enabled = use_plane_aux and (not args.plane_aux_soft_target_only_debug)
     
     mode = args.mode
 
@@ -462,6 +469,8 @@ def train():
         logger.info('n_workers_val: {}'.format(n_workers_val))
         logger.info('use_boundary_2: {}'.format(use_boundary_2))
         logger.info('use_boundary_4: {}'.format(use_boundary_4))
+        logger.info('plane_aux_soft_target_only_debug: {}'.format(args.plane_aux_soft_target_only_debug))
+        logger.info('plane_aux_loss_enabled: {}'.format(plane_aux_loss_enabled))
         logger.info('use_boundary_8: {}'.format(use_boundary_8))
         logger.info('use_boundary_16: {}'.format(use_boundary_16))
         logger.info('use_plane_aux: {}'.format(use_plane_aux))
@@ -525,7 +534,8 @@ def train():
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
     use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
     use_plane_aux=use_plane_aux, plane_aux_tap=args.plane_aux_tap, plane_aux_mid=args.plane_aux_mid,
-    zeroplane_model=zeroplane_model, zeroplane_soft_target_fn=zeroplane_soft_target_fn)
+    zeroplane_model=zeroplane_model, zeroplane_soft_target_fn=zeroplane_soft_target_fn,
+    plane_aux_soft_target_only_debug=args.plane_aux_soft_target_only_debug)
 
     if not args.ckpt is None:
         # Resume training from a previously saved checkpoint
@@ -737,7 +747,7 @@ def train():
         # Plane auxiliary loss: distill the full 21-channel ZeroPlane sem_seg
         # output (20 plane slots + 1 non-plane slot) into the STDC aux head.
         plane_aux_loss = torch.tensor(0.0, device=im.device)
-        if use_plane_aux and plane_aux_out is not None and plane_aux_soft_target is not None:
+        if plane_aux_loss_enabled and plane_aux_out is not None and plane_aux_soft_target is not None:
             plane_aux_soft_target = plane_aux_soft_target.detach()
             if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
                 plane_aux_soft_target = F.interpolate(
@@ -776,7 +786,7 @@ def train():
         # the boundary heads are not called so there is zero extra cost.
         # ---------------------------------------------------------------
         loss = lossp + loss2 + loss3 + boundery_bce_loss + boundery_dice_loss
-        if use_plane_aux:
+        if plane_aux_loss_enabled:
             loss = loss + args.plane_loss_weight * plane_aux_loss
         
         loss.backward()   # compute gradients via backpropagation
@@ -786,7 +796,7 @@ def train():
 
         loss_boundery_bce.append(boundery_bce_loss.item())
         loss_boundery_dice.append(boundery_dice_loss.item())
-        if use_plane_aux:
+        if plane_aux_loss_enabled:
             loss_plane_aux.append(plane_aux_loss.item())
 
         ## print training log message
@@ -809,7 +819,7 @@ def train():
                 'eta: {eta}',
                 'time: {time:.4f}',
             ]
-            if use_plane_aux:
+            if plane_aux_loss_enabled:
                 msg_items.insert(5, 'plane_aux_loss: {plane_aux_loss:.4f}')
             msg = ', '.join(msg_items).format(
                 it = it+1,
@@ -818,7 +828,7 @@ def train():
                 loss = loss_avg,
                 boundery_bce_loss = loss_boundery_bce_avg,
                 boundery_dice_loss = loss_boundery_dice_avg,
-                plane_aux_loss = (sum(loss_plane_aux) / len(loss_plane_aux)) if use_plane_aux and len(loss_plane_aux) > 0 else 0.0,
+                plane_aux_loss = (sum(loss_plane_aux) / len(loss_plane_aux)) if plane_aux_loss_enabled and len(loss_plane_aux) > 0 else 0.0,
                 time = t_intv,
                 eta = eta
             )

@@ -402,7 +402,7 @@ class  BiSeNet(nn.Module):
                                   At inference these are simply not called, so
                                   there is ZERO extra runtime cost (Paper §3.3).
     """
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_plane_aux=False, plane_aux_tap='fuse', plane_aux_mid=64, zeroplane_model=None, zeroplane_soft_target_fn=None, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_plane_aux=False, plane_aux_tap='fuse', plane_aux_mid=64, zeroplane_model=None, zeroplane_soft_target_fn=None, plane_aux_soft_target_only_debug=False, *args, **kwargs):
         super(BiSeNet, self).__init__()
         
         self.use_boundary_2 = use_boundary_2
@@ -411,6 +411,7 @@ class  BiSeNet(nn.Module):
         self.use_boundary_16 = use_boundary_16
         self.use_plane_aux = use_plane_aux
         self.plane_aux_tap = plane_aux_tap
+        self.plane_aux_soft_target_only_debug = plane_aux_soft_target_only_debug
         # self.heat_map = heat_map
         self.cp = ContextPath(backbone, pretrain_model, use_conv_last=use_conv_last)
             
@@ -528,7 +529,10 @@ class  BiSeNet(nn.Module):
                 image=x,
                 zeroplane_inputs=zeroplane_inputs,
             )
-            plane_aux_logits = F.interpolate(plane_aux_logits, (H, W), mode='bilinear', align_corners=True)
+            if self.plane_aux_soft_target_only_debug:
+                plane_aux_logits = None
+            else:
+                plane_aux_logits = F.interpolate(plane_aux_logits, (H, W), mode='bilinear', align_corners=True)
             if plane_aux_soft_target is not None and plane_aux_soft_target.shape[-2:] != (H, W):
                 plane_aux_soft_target = F.interpolate(
                     plane_aux_soft_target,
@@ -536,6 +540,24 @@ class  BiSeNet(nn.Module):
                     mode='bilinear',
                     align_corners=True,
                 )
+            if self.plane_aux_soft_target_only_debug:
+                if plane_aux_soft_target is None:
+                    print('[plane_aux_soft_target] None')
+                else:
+                    flat = plane_aux_soft_target.detach().reshape(-1)
+                    sample = flat[:8].cpu().tolist()
+                    print(
+                        '[plane_aux_soft_target] '
+                        'shape={}, dtype={}, device={}, min={:.6f}, max={:.6f}, mean={:.6f}, sample(first_8)={}'.format(
+                            tuple(plane_aux_soft_target.shape),
+                            plane_aux_soft_target.dtype,
+                            plane_aux_soft_target.device,
+                            plane_aux_soft_target.min().item(),
+                            plane_aux_soft_target.max().item(),
+                            plane_aux_soft_target.mean().item(),
+                            sample,
+                        )
+                    )
 
 
         # Return segmentation outputs + boundary outputs selected by training flags.
