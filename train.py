@@ -22,7 +22,6 @@ from loss.loss import OhemCELoss              # Segmentation loss (OHEM cross-en
 from loss.detail_loss import DetailAggregateLoss  # Boundary loss (Paper §3.3)
 from evaluation import MscEvalV0              # mIOU evaluator
 from optimizer_loss import Optimizer          # SGD with warmup + poly LR decay (Paper §4)
-from ZeroPlane.third_party.dust3r.croco.stereoflow.criterion import LaplacianLossBounded2
 
 import torch
 import torch.nn as nn
@@ -36,6 +35,8 @@ import logging
 import time
 import datetime
 import argparse
+import sys
+import numpy as np
 
 logger = logging.getLogger()
 
@@ -50,15 +51,55 @@ def str2bool(v):
 
 def parse_args():
     parse = argparse.ArgumentParser()
+
+    # Demo-style static defaults (from ZeroPlane-ref/demo/demo.py usage).
+    # You can edit these defaults directly if you want fixed behavior without
+    # changing shell commands each run.
+    parse.add_argument(
+        '--config-file',
+        dest='config_file',
+        type=str,
+        default='ZeroPlane-ref/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml',
+        help='ZeroPlane config yaml (demo-style alias).',
+    )
+    parse.add_argument(
+        '--input',
+        dest='input',
+        nargs='+',
+        default=['./demo/cvpr_demo.png'],
+        help='Demo-style input image path(s).',
+    )
+    parse.add_argument(
+        '--out',
+        dest='out',
+        type=str,
+        default='./demo/demo_out',
+        help='Demo-style output directory.',
+    )
+    parse.add_argument(
+        '--resize_w',
+        dest='resize_w',
+        type=int,
+        default=640,
+        help='Demo-style resize width.',
+    )
+    parse.add_argument(
+        '--resize_h',
+        dest='resize_h',
+        type=int,
+        default=480,
+        help='Demo-style resize height.',
+    )
+    parse.add_argument(
+        '--opts',
+        dest='opts',
+        nargs='*',
+        default=['MODEL.WEIGHTS', './checkpoints/dust3r_encoder_released.pth'],
+        help='Demo-style detectron2 KEY VALUE overrides.',
+    )
     
     parse.add_argument(
         '--use_plane_aux',
-        dest='use_plane_aux',
-        type = str2bool,
-        default = False
-    )
-    parse.add_argument(
-        '--usePlanarHead',
         dest='use_plane_aux',
         type = str2bool,
         default = False
@@ -81,13 +122,13 @@ def parse_args():
         type=int,
         default=64,
     )
-    
     parse.add_argument(
-            '--local_rank',
-            dest = 'local_rank',
-            type = int,
-            default = -1,
-            )
+        '--local_rank',
+        dest = 'local_rank',
+        type = int,
+        default = -1,
+    )
+
     parse.add_argument(
             '--n_workers_train',
             dest = 'n_workers_train',
@@ -203,6 +244,175 @@ def parse_args():
     return parse.parse_args()
 
 
+def _build_zeroplane_cfg(config_path, config_opts=None, ckpt_path=''):
+    if not config_path:
+        raise ValueError('zeroplane_config is required for Detectron2-style checkpoints')
+
+    if not osp.isfile(config_path):
+        raise FileNotFoundError('zeroplane_config not found: {}'.format(config_path))
+
+    repo_root = osp.dirname(osp.abspath(__file__))
+    zeroplane_root = osp.join(repo_root, 'ZeroPlane-ref')
+    if osp.isdir(zeroplane_root) and zeroplane_root not in sys.path:
+        sys.path.insert(0, zeroplane_root)
+
+# python3 -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
+    try:
+        from detectron2.config import get_cfg
+        from detectron2.projects.deeplab import add_deeplab_config
+        from ZeroPlane import add_ZeroPlane_config
+    except ImportError as exc:
+        raise ImportError(
+            'Failed to import Detectron2/ZeroPlane dependencies for zeroplane initialization: {}'.format(exc)
+        )
+
+    cfg = get_cfg()
+    add_deeplab_config(cfg)
+    add_ZeroPlane_config(cfg)
+    cfg.merge_from_file(config_path)
+    if config_opts:
+        cfg.merge_from_list(config_opts)
+    if ckpt_path:
+        cfg.defrost()
+        cfg.MODEL.WEIGHTS = ckpt_path
+        cfg.freeze()
+    return cfg
+
+
+class ZeroPlaneDefaultPredictorSoftTarget:
+    def __init__(self, predictor, zeroplane_root):
+        self.predictor = predictor
+        self.zeroplane_root = zeroplane_root
+        self.device = torch.device(self.predictor.cfg.MODEL.DEVICE)
+
+        normals_path = osp.join(self.zeroplane_root, 'cluster_anchor', 'new_mixed_normal_anchors_7.npy')
+        offsets_path = osp.join(self.zeroplane_root, 'cluster_anchor', 'new_mixed_offset_anchors_20.npy')
+        self.anchor_normals = torch.tensor(np.load(normals_path)).to(self.device)
+        self.anchor_offsets = torch.tensor(np.load(offsets_path)).to(self.device)
+
+    def _get_coordinate_map(self, h, w, oh, ow):
+        K = np.asarray([[518.86, 0, 325.58],
+                        [0, 519.47, 253.74],
+                        [0, 0, 1]], dtype=np.float32)
+        K_inv = np.linalg.inv(K)
+        K_inv = torch.FloatTensor(K_inv).to(self.device)
+
+        x = torch.arange(w, dtype=torch.float32).view(1, w) / w * ow
+        y = torch.arange(h, dtype=torch.float32).view(h, 1) / h * oh
+        x = x.to(self.device)
+        y = y.to(self.device)
+        xx = x.repeat(h, 1)
+        yy = y.repeat(1, w)
+        xy1 = torch.stack((xx, yy, torch.ones((h, w), dtype=torch.float32).to(self.device)))
+        xy1 = xy1.view(3, -1)
+        return torch.matmul(K_inv, xy1)
+
+    def _sem_seg_from_prediction(self, prediction):
+        if not isinstance(prediction, dict):
+            return None
+        sem_seg = prediction.get('sem_seg', None)
+        if sem_seg is None or (not torch.is_tensor(sem_seg)):
+            return None
+        return torch.clamp(sem_seg.float(), 0.0, 1.0)
+
+    def __call__(self, image=None, zeroplane_inputs=None, pred_logits=None):
+        if image is None or (not torch.is_tensor(image)):
+            return None
+
+        sem_seg_maps = []
+        for img in image:
+            img_cpu = img.detach().float().cpu()
+            if img_cpu.dim() != 3:
+                continue
+            h, w = img_cpu.shape[1], img_cpu.shape[2]
+
+            img_np = img_cpu.permute(1, 2, 0).numpy()
+            if img_np.max() <= 1.5:
+                img_np = img_np * 255.0
+            img_np = np.clip(img_np, 0.0, 255.0).astype(np.uint8)
+
+            anchors = {
+                'anchor_normals': self.anchor_normals,
+                'anchor_offsets': self.anchor_offsets,
+            }
+            k_inv_dot_xy_1 = self._get_coordinate_map(h=h, w=w, oh=h, ow=w)
+            prediction = self.predictor(img_np, anchors, k_inv_dot_xy_1)
+            sem_seg = self._sem_seg_from_prediction(prediction)
+            if sem_seg is not None:
+                sem_seg_maps.append(sem_seg)
+
+        if len(sem_seg_maps) == 0:
+            return None
+        return torch.stack(sem_seg_maps, dim=0)
+
+
+def _normalize_sem_seg_teacher(teacher_logits):
+    # ZeroPlane sem_seg channels are per-plane confidence maps, not a normalized
+    # probability distribution.  Normalize across channels so the student can
+    # learn a clean per-pixel distribution with KL distillation.
+    teacher_logits = torch.clamp(teacher_logits, min=0.0)
+    teacher_sum = teacher_logits.sum(dim=1, keepdim=True)
+    fallback = teacher_sum <= 1e-6
+    teacher_probs = teacher_logits / teacher_sum.clamp_min(1e-6)
+
+    if fallback.any():
+        teacher_probs = teacher_probs.clone()
+        teacher_probs[fallback.expand_as(teacher_probs)] = 0.0
+        teacher_probs[:, -1:, :, :][fallback] = 1.0
+
+    return teacher_probs
+
+
+def build_zeroplane_soft_target_fn(config_path, config_opts=None, ckpt_path=''):
+    if not ckpt_path:
+        return None
+
+    if not osp.isfile(ckpt_path):
+        raise FileNotFoundError('zeroplane_ckpt not found: {}'.format(ckpt_path))
+
+    repo_root = osp.dirname(osp.abspath(__file__))
+    zeroplane_root = osp.join(repo_root, 'ZeroPlane-ref')
+    demo_root = osp.join(zeroplane_root, 'demo')
+    if osp.isdir(demo_root) and demo_root not in sys.path:
+        sys.path.insert(0, demo_root)
+
+    try:
+        from predictor import DefaultPredictor
+    except ImportError as exc:
+        raise ImportError('Failed to import ZeroPlane demo DefaultPredictor: {}'.format(exc))
+
+    cfg = _build_zeroplane_cfg(config_path=config_path, config_opts=config_opts, ckpt_path=ckpt_path)
+    predictor = DefaultPredictor(cfg)
+    return ZeroPlaneDefaultPredictorSoftTarget(predictor, zeroplane_root)
+
+
+def load_zeroplane_soft_target_fn(ckpt_path='', config_path='', config_opts=None):
+    if not ckpt_path:
+        return None
+
+    if not osp.isfile(ckpt_path):
+        raise FileNotFoundError('zeroplane_ckpt not found: {}'.format(ckpt_path))
+
+    soft_target_fn = build_zeroplane_soft_target_fn(
+        config_path=config_path,
+        config_opts=config_opts,
+        ckpt_path=ckpt_path,
+    )
+    return soft_target_fn
+
+
+def _extract_model_weights_from_opts(opts):
+    if not opts:
+        return ''
+
+    idx = 0
+    while idx + 1 < len(opts):
+        if opts[idx] == 'MODEL.WEIGHTS':
+            return opts[idx + 1]
+        idx += 2
+    return ''
+
+
 def train():
     args = parse_args()
     
@@ -259,6 +469,8 @@ def train():
         logger.info('plane_aux_mid: {}'.format(args.plane_aux_mid))
         logger.info('plane_loss_weight: {}'.format(args.plane_loss_weight))
         logger.info('mode: {}'.format(args.mode))
+        logger.info('demo config_file: {}'.format(args.config_file))
+        logger.info('demo opts: {}'.format(args.opts if args.opts else 'None'))
     
     
     ds = CityScapes(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale)
@@ -290,10 +502,30 @@ def train():
     # use_boundary_*  → turn on the boundary prediction heads described in Paper §3.3
     # ---------------------------------------------------------------
     ignore_idx = 255  # Cityscapes uses label 255 for "don't care" pixels — we ignore them in the loss
+
+    zeroplane_model = None
+    effective_zeroplane_opts = args.opts
+    effective_zeroplane_config = args.config_file
+    effective_zeroplane_ckpt = _extract_model_weights_from_opts(effective_zeroplane_opts)
+
+    if use_plane_aux and effective_zeroplane_ckpt:
+        zeroplane_device = 'cuda:{}'.format(args.local_rank)
+        zeroplane_soft_target_fn = load_zeroplane_soft_target_fn(
+            ckpt_path=effective_zeroplane_ckpt,
+            config_path=effective_zeroplane_config,
+            config_opts=effective_zeroplane_opts,
+        )
+        zeroplane_model = None
+        if dist.get_rank() == 0:
+            logger.info('Initialized zeroplane model from ckpt {} on {}'.format(effective_zeroplane_ckpt, zeroplane_device))
+    else:
+        zeroplane_soft_target_fn = None
+
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
     use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
-    use_plane_aux=use_plane_aux, plane_aux_tap=args.plane_aux_tap, plane_aux_mid=args.plane_aux_mid)
+    use_plane_aux=use_plane_aux, plane_aux_tap=args.plane_aux_tap, plane_aux_mid=args.plane_aux_mid,
+    zeroplane_model=zeroplane_model, zeroplane_soft_target_fn=zeroplane_soft_target_fn)
 
     if not args.ckpt is None:
         # Resume training from a previously saved checkpoint
@@ -342,7 +574,6 @@ def train():
     #          number of edge pixels vs. the large number of non-edge pixels.
     # ---------------------------------------------------------------
     boundary_loss_func = DetailAggregateLoss()
-    plane_loss_func = LaplacianLossBounded2(max_gtnorm=None)
     # ---------------------------------------------------------------
     # Optimiser: SGD with Warmup + Polynomial LR Decay (Paper §4)
     #
@@ -503,30 +734,36 @@ def train():
             boundery_bce_loss += boundery_bce_loss8
             boundery_dice_loss += boundery_dice_loss8
 
-        # Plane auxiliary soft-target loss from dust3r criterion
+        # Plane auxiliary loss: distill the full 21-channel ZeroPlane sem_seg
+        # output (20 plane slots + 1 non-plane slot) into the STDC aux head.
         plane_aux_loss = torch.tensor(0.0, device=im.device)
         if use_plane_aux and plane_aux_out is not None and plane_aux_soft_target is not None:
-            # detach gradient tracking
             plane_aux_soft_target = plane_aux_soft_target.detach()
             if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
-                # resize target by interpolation into aux out
                 plane_aux_soft_target = F.interpolate(
                     plane_aux_soft_target,
                     size=plane_aux_out.shape[-2:],
                     mode='bilinear',
                     align_corners=True,
                 )
-            
-            # keep values between 0 and 1     
-            plane_aux_soft_target = torch.clamp(plane_aux_soft_target, min=0.0, max=1.0)
+
+            if plane_aux_soft_target.shape[1] != plane_aux_out.shape[1]:
+                raise ValueError(
+                    'Plane aux target channels ({}) do not match aux head channels ({})'.format(
+                        plane_aux_soft_target.shape[1], plane_aux_out.shape[1]
+                    )
+                )
+
+            teacher_probs = _normalize_sem_seg_teacher(plane_aux_soft_target)
+            student_log_probs = F.log_softmax(plane_aux_out, dim=1)
             valid_mask = (lb != ignore_idx).unsqueeze(1)
             if valid_mask.any():
-                gt_for_lap = plane_aux_soft_target.clone()
-                gt_for_lap[~valid_mask] = float('nan')
-
-                pred_for_lap = torch.sigmoid(plane_aux_out)
-                conf_for_lap = plane_aux_out
-                plane_aux_loss = plane_loss_func(pred_for_lap, gt_for_lap, conf_for_lap)
+                plane_aux_loss_map = F.kl_div(
+                    student_log_probs,
+                    teacher_probs,
+                    reduction='none',
+                ).sum(dim=1, keepdim=True)
+                plane_aux_loss = plane_aux_loss_map[valid_mask].mean()
 
         # ---------------------------------------------------------------
         # Total loss = segmentation losses + boundary losses (Paper Eq. 3 / §4)

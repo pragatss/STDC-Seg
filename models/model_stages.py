@@ -115,81 +115,34 @@ class BiSeNetOutput(nn.Module):
 
 
 class PlaneAuxHead(nn.Module):
-    def __init__(self, in_chan, mid_chan=64, zeroplane_model=None, zeroplane_soft_target_fn=None, *args, **kwargs):
+    def __init__(self, in_chan, mid_chan=64, n_classes=21, zeroplane_model=None, zeroplane_soft_target_fn=None, *args, **kwargs):
         super(PlaneAuxHead, self).__init__()
-        self.pred_head = BiSeNetOutput(in_chan, mid_chan, 1)
+        # Match ZeroPlane sem_seg output shape: [num_plane_slots + non_plane, H, W].
+        self.pred_head = BiSeNetOutput(in_chan, mid_chan, n_classes)
         self.zeroplane_model = zeroplane_model
         self.zeroplane_soft_target_fn = zeroplane_soft_target_fn
 
         if isinstance(self.zeroplane_model, nn.Module):
             self.zeroplane_model.eval()
-            for param in self.zeroplane_model.parameters():
-                param.requires_grad = False
+            # for param in self.zeroplane_model.parameters():
+            #     param.requires_grad = False
     
-    def _extract_plane_prob_from_zeroplane_output(self, outputs):
-        if outputs is None:
-            return None
-
-        if torch.is_tensor(outputs):
-            plane = outputs.float()
-            if plane.ndim == 2:
-                plane = plane.unsqueeze(0).unsqueeze(0)
-            elif plane.ndim == 3:
-                plane = plane.unsqueeze(1)
-            elif plane.ndim == 4 and plane.size(1) > 1:
-                plane = plane[:, :1]
-            return torch.clamp(plane, 0.0, 1.0)
-
-        if isinstance(outputs, dict):
-            outputs = [outputs]
-
-        if not isinstance(outputs, (list, tuple)):
-            return None
-
-        plane_maps = []
-        for item in outputs:
-            if not isinstance(item, dict):
-                continue
-
-            sem_seg = item.get('sem_seg', None)
-            if sem_seg is None or (not torch.is_tensor(sem_seg)):
-                continue
-
-            sem_seg = sem_seg.float()
-            if sem_seg.ndim == 2:
-                plane_map = sem_seg
-            elif sem_seg.ndim == 3:
-                if sem_seg.size(0) > 1:
-                    # ZeroPlane demo uses predictions["sem_seg"].argmax(dim=0), where sem_seg
-                    # is [num_queries, H, W] and last channel is the synthesized non-plane map.
-                    # For binary plane supervision, use robust plane probability as the stronger
-                    # signal between:
-                    #   (1) 1 - P(non-plane)
-                    #   (2) max over all plane channels
-                    non_plane = sem_seg[-1]
-                    plane_from_non_plane = 1.0 - non_plane
-                    plane_from_planes = sem_seg[:-1].max(dim=0).values
-                    plane_map = torch.max(plane_from_non_plane, plane_from_planes)
-                else:
-                    plane_map = sem_seg[0]
-            else:
-                continue
-
-            plane_maps.append(torch.clamp(plane_map, 0.0, 1.0).unsqueeze(0))
-
-        if len(plane_maps) == 0:
-            return None
-
-        plane = torch.stack(plane_maps, dim=0)
-        return plane
-
     def _predict_zeroplane_soft_target(self, image=None, zeroplane_inputs=None, pred_logits=None):
         if self.zeroplane_soft_target_fn is not None:
-            return self.zeroplane_soft_target_fn(
+            soft_target = self.zeroplane_soft_target_fn(
                 image=image,
                 zeroplane_inputs=zeroplane_inputs,
                 pred_logits=pred_logits,
             )
+            if soft_target is None:
+                return None
+            if torch.is_tensor(soft_target):
+                if soft_target.ndim == 2:
+                    soft_target = soft_target.unsqueeze(0).unsqueeze(0)
+                elif soft_target.ndim == 3:
+                    soft_target = soft_target.unsqueeze(0)
+                return torch.clamp(soft_target.float(), 0.0, 1.0)
+            return None
 
         if self.zeroplane_model is None:
             return None
@@ -201,19 +154,26 @@ class PlaneAuxHead(nn.Module):
         if model_inputs is None:
             return None
 
-        return self.zeroplane_model(model_inputs)
+        outputs = self.zeroplane_model(model_inputs)
+        if torch.is_tensor(outputs):
+            plane = outputs.float()
+            if plane.ndim == 2:
+                plane = plane.unsqueeze(0).unsqueeze(0)
+            elif plane.ndim == 3:
+                plane = plane.unsqueeze(0)
+            return torch.clamp(plane, 0.0, 1.0)
+        return None
 
     def forward(self, feat, image=None, zeroplane_inputs=None):
         pred_logits = self.pred_head(feat)
         soft_target = None
 
         with torch.no_grad():
-            zeroplane_raw = self._predict_zeroplane_soft_target(
+            soft_target = self._predict_zeroplane_soft_target(
                 image=image,
                 zeroplane_inputs=zeroplane_inputs,
                 pred_logits=pred_logits,
             )
-            soft_target = self._extract_plane_prob_from_zeroplane_output(zeroplane_raw)
 
             if soft_target is not None:
                 soft_target = soft_target.to(pred_logits.device, dtype=pred_logits.dtype)
@@ -512,6 +472,7 @@ class  BiSeNet(nn.Module):
             self.plane_aux_head = PlaneAuxHead(
                 plane_inplanes_map[self.plane_aux_tap],
                 mid_chan=plane_aux_mid,
+                n_classes=21,
                 zeroplane_model=zeroplane_model,
                 zeroplane_soft_target_fn=zeroplane_soft_target_fn,
             )
