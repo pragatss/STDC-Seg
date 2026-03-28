@@ -1,0 +1,4 @@
+checkpoints/*
+checkpoints/**/*.pth
+.DS_Store
+.DS_Store
