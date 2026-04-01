@@ -246,3 +246,11 @@ python3 -m pip install -r requirements.txt
 ```
 
 > **Note:** PyTorch MUST be installed before Detectron2 or the build will fail.
+
+
+## COMMANDS RUN TO MAKE DECTRON instALL WORK
+conda activate stdcseg18
+conda env update -n stdcseg18 -f ZeroPlane/environment.yml
+python -m pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+python -m pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
+cd ZeroPlane/ZeroPlane/modeling/pixel_decoder/ops && sh make.sh

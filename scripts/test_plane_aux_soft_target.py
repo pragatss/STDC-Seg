@@ -44,7 +44,7 @@ def main():
     parser.add_argument('--width', type=int, default=512)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', choices=['cpu', 'cuda'])
     parser.add_argument('--print-full', action='store_true', help='Print full soft target tensor')
-    parser.add_argument('--config-file', type=str, default='ZeroPlane-ref/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml')
+    parser.add_argument('--config-file', type=str, default='ZeroPlane/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml')
     parser.add_argument('--opts', nargs='*', default=['MODEL.WEIGHTS', './checkpoints/dust3r_encoder_released.pth'])
     parser.add_argument('--zeroplane-ckpt', type=str, default='', help='Optional explicit ckpt path; overrides MODEL.WEIGHTS in --opts')
     args = parser.parse_args()
