@@ -130,8 +130,7 @@ def parse_args():
         default=False,
     )
     parse.add_argument(
-        '--local_rank',
-        dest = 'local_rank',
+            '--local_rank', '--local-rank',
         type = int,
         default = -1,
     )
@@ -421,7 +420,9 @@ def _extract_model_weights_from_opts(opts):
 
 
 def train():
+    print('[TRAIN] train() start', flush=True)
     args = parse_args()
+    print('[TRAIN] args parsed, local_rank={}'.format(args.local_rank), flush=True)
     
     save_pth_path = os.path.join(args.respath, 'pths')
     dspth = './data'
@@ -432,16 +433,21 @@ def train():
     if not osp.exists(save_pth_path):
         os.makedirs(save_pth_path)
     
-    
+    print('[TRAIN] cuda.set_device({})'.format(args.local_rank), flush=True)
     torch.cuda.set_device(args.local_rank)
+    world_size = torch.cuda.device_count()
+    backend = 'gloo' if world_size <= 1 else 'nccl'
+    print('[TRAIN] dist.init_process_group start (backend={}, world_size={})'.format(backend, world_size), flush=True)
     dist.init_process_group(
-                backend = 'nccl',
-                init_method = 'tcp://127.0.0.1:33274',
-                world_size = torch.cuda.device_count(),
+                backend = backend,
+                init_method = 'env://',
+                world_size = world_size,
                 rank=args.local_rank
                 )
+    print('[TRAIN] dist.init_process_group done', flush=True)
     
     setup_logger(args.respath)
+    print('[TRAIN] logger ready', flush=True)
     ## dataset
     n_classes = 19
     n_img_per_gpu = args.n_img_per_gpu
@@ -483,7 +489,9 @@ def train():
         logger.info('demo opts: {}'.format(args.opts if args.opts else 'None'))
     
     
+    print('[TRAIN] building CityScapes dataset (train)...', flush=True)
     ds = CityScapes(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale)
+    print('[TRAIN] CityScapes train dataset ready ({} samples)'.format(len(ds)), flush=True)
     sampler = torch.utils.data.distributed.DistributedSampler(ds)
     dl = DataLoader(ds,
                     batch_size = n_img_per_gpu,
@@ -493,7 +501,9 @@ def train():
                     pin_memory = False,
                     drop_last = True)
     # exit(0)
+    print('[TRAIN] building CityScapes dataset (val)...', flush=True)
     dsval = CityScapes(dspth, mode='val', randomscale=randomscale)
+    print('[TRAIN] CityScapes val dataset ready ({} samples)'.format(len(dsval)), flush=True)
     sampler_val = torch.utils.data.distributed.DistributedSampler(dsval)
     dlval = DataLoader(dsval,
                     batch_size = 2,
@@ -518,8 +528,10 @@ def train():
     effective_zeroplane_config = args.config_file
     effective_zeroplane_ckpt = _extract_model_weights_from_opts(effective_zeroplane_opts)
 
+    print('[TRAIN] use_plane_aux={}, ckpt={}'.format(use_plane_aux, effective_zeroplane_ckpt), flush=True)
     if use_plane_aux and effective_zeroplane_ckpt:
         zeroplane_device = 'cuda:{}'.format(args.local_rank)
+        print('[TRAIN] loading ZeroPlane soft-target model...', flush=True)
         zeroplane_soft_target_fn = load_zeroplane_soft_target_fn(
             ckpt_path=effective_zeroplane_ckpt,
             config_path=effective_zeroplane_config,
@@ -531,6 +543,7 @@ def train():
     else:
         zeroplane_soft_target_fn = None
 
+    print('[TRAIN] building BiSeNet (backbone={})...'.format(args.backbone), flush=True)
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
     use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
@@ -538,11 +551,14 @@ def train():
     zeroplane_model=zeroplane_model, zeroplane_soft_target_fn=zeroplane_soft_target_fn,
     plane_aux_soft_target_only_debug=args.plane_aux_soft_target_only_debug)
 
+    print('[TRAIN] BiSeNet built', flush=True)
     if not args.ckpt is None:
         # Resume training from a previously saved checkpoint
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
+    print('[TRAIN] net.cuda() start...', flush=True)
     net.cuda()
     net.train()
+    print('[TRAIN] net on GPU, training mode set', flush=True)
     # Spread training across multiple GPUs (one process per GPU)
     net = nn.parallel.DistributedDataParallel(net,
             device_ids = [args.local_rank, ],
@@ -634,6 +650,7 @@ def train():
     #   3. Work out how to nudge each weight to reduce that error (backward pass).
     #   4. Update the weights (optimiser step).
     # ---------------------------------------------------------------
+    print('[TRAIN] entering main training loop', flush=True)
     ## train loop
     msg_iter = 50
     loss_avg = []
