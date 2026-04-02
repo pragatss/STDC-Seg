@@ -28,6 +28,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch.distributed as dist
+from detectron2.config import CfgNode as CN
 
 import os
 import os.path as osp
@@ -59,7 +60,7 @@ def parse_args():
         '--config-file',
         dest='config_file',
         type=str,
-        default='ZeroPlane-ref/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml',
+        default='ZeroPlane/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml',
         help='ZeroPlane config yaml (demo-style alias).',
     )
     parse.add_argument(
@@ -258,7 +259,7 @@ def _build_zeroplane_cfg(config_path, config_opts=None, ckpt_path=''):
         raise FileNotFoundError('zeroplane_config not found: {}'.format(config_path))
 
     repo_root = osp.dirname(osp.abspath(__file__))
-    zeroplane_root = osp.join(repo_root, 'ZeroPlane-ref')
+    zeroplane_root = osp.join(repo_root, 'ZeroPlane')
     if osp.isdir(zeroplane_root) and zeroplane_root not in sys.path:
         sys.path.insert(0, zeroplane_root)
 
@@ -266,7 +267,7 @@ def _build_zeroplane_cfg(config_path, config_opts=None, ckpt_path=''):
     try:
         from detectron2.config import get_cfg
         from detectron2.projects.deeplab import add_deeplab_config
-        from ZeroPlane import add_ZeroPlane_config
+        from ZeroPlane.ZeroPlane import add_ZeroPlane_config
     except ImportError as exc:
         raise ImportError(
             'Failed to import Detectron2/ZeroPlane dependencies for zeroplane initialization: {}'.format(exc)
@@ -377,13 +378,13 @@ def build_zeroplane_soft_target_fn(config_path, config_opts=None, ckpt_path=''):
         raise FileNotFoundError('zeroplane_ckpt not found: {}'.format(ckpt_path))
 
     repo_root = osp.dirname(osp.abspath(__file__))
-    zeroplane_root = osp.join(repo_root, 'ZeroPlane-ref')
+    zeroplane_root = osp.join(repo_root, 'ZeroPlane')
     demo_root = osp.join(zeroplane_root, 'demo')
     if osp.isdir(demo_root) and demo_root not in sys.path:
         sys.path.insert(0, demo_root)
 
     try:
-        from predictor import DefaultPredictor
+        from ZeroPlane.demo.predictor import DefaultPredictor
     except ImportError as exc:
         raise ImportError('Failed to import ZeroPlane demo DefaultPredictor: {}'.format(exc))
 
