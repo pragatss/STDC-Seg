@@ -6,3 +6,4 @@ loss/*
 models/*
 modules/*
 nets/*
+data/*
