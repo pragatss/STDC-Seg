@@ -218,4 +218,39 @@ CUDA_VISIBLE_DEVICES=0 python run_latency.py
 * Latency measurement from the [Faster-Seg](https://github.com/VITA-Group/FasterSeg).
 
 ## RUN COMMAND
-python -m torch.distributed.launch --nproc_per_node=1 train.py --respath checkpoints/train_STDC1-Seg/ --backbone STDCNet813 --mode train --n_workers_train 12 --n_workers_val 1 --max_iter 60000 --use_boundary_8 True --pretrain_path checkpoints/STDCNet813M_73.91.tar
+1. conda activate stdcseg'
+2. python -m torch.distributed.launch --nproc_per_node=1 train.py --respath checkpoints/train_STDC1-Seg/ --backbone STDCNet813 --mode train --n_workers_train 12 --n_workers_val 1 --max_iter 60000 --use_boundary_8 True --pretrain_path checkpoints/STDCNet813M_73.91.tar
+
+
+## Env for zeroplane with torch 1.8
+
+```bash
+# 1. Create and activate new environment
+conda create -n stdcseg18 python=3.9 -y
+conda activate stdcseg18
+
+# 2. Upgrade packaging tools
+python3 -m pip install --upgrade pip setuptools wheel
+
+# 3. Install PyTorch cu121 (must match system nvcc; use --force-reinstall if another version is present)
+python3 -m pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 4. Verify PyTorch
+python3 -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())"
+
+# 5. Install Detectron2 (--no-build-isolation lets the build subprocess find torch)
+python3 -m pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
+
+# 6. Install remaining project dependencies
+python3 -m pip install -r requirements.txt
+```
+
+> **Note:** PyTorch MUST be installed before Detectron2 or the build will fail.
+
+
+## COMMANDS RUN TO MAKE DECTRON instALL WORK
+conda activate stdcseg18
+conda env update -n stdcseg18 -f ZeroPlane/environment.yml
+python -m pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+python -m pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
+cd ZeroPlane/ZeroPlane/modeling/pixel_decoder/ops && sh make.sh
