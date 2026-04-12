@@ -218,7 +218,7 @@ class AsymmetricCroCo3DStereo (
         # combine all ref images into object-centric representation
         dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             # dpt head
             if feature_only:
                 res1 = self.downstream_head1([tok.float() for tok in dec1], (shape1[0][0], shape1[0][1]), feature_only=feature_only)
