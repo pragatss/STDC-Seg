@@ -290,11 +290,16 @@ class ZeroPlaneDefaultPredictorSoftTarget:
         self.predictor = predictor
         self.zeroplane_root = zeroplane_root
         self.device = torch.device(self.predictor.cfg.MODEL.DEVICE)
+        self._call_count = 0
+        print('[ZeroPlaneDefaultPredictorSoftTarget.__init__] device={}'.format(self.device), flush=True)
 
         normals_path = osp.join(self.zeroplane_root, 'cluster_anchor', 'new_mixed_normal_anchors_7.npy')
         offsets_path = osp.join(self.zeroplane_root, 'cluster_anchor', 'new_mixed_offset_anchors_20.npy')
+        print('[ZeroPlaneDefaultPredictorSoftTarget.__init__] loading anchors...', flush=True)
         self.anchor_normals = torch.tensor(np.load(normals_path)).to(self.device)
         self.anchor_offsets = torch.tensor(np.load(offsets_path)).to(self.device)
+        print('[ZeroPlaneDefaultPredictorSoftTarget.__init__] anchor_normals={} anchor_offsets={}'.format(
+              tuple(self.anchor_normals.shape), tuple(self.anchor_offsets.shape)), flush=True)
 
     def _get_coordinate_map(self, h, w, oh, ow):
         K = np.asarray([[518.86, 0, 325.58],
@@ -322,7 +327,15 @@ class ZeroPlaneDefaultPredictorSoftTarget:
         return torch.clamp(sem_seg.float(), 0.0, 1.0)
 
     def __call__(self, image=None, zeroplane_inputs=None, pred_logits=None):
+        self._call_count += 1
+        _verbose = (self._call_count <= 2)
+        if _verbose:
+            print('[ZeroPlanePredictor.__call__] call #{} image={}'.format(
+                  self._call_count,
+                  tuple(image.shape) if torch.is_tensor(image) else type(image).__name__), flush=True)
         if image is None or (not torch.is_tensor(image)):
+            if _verbose:
+                print('[ZeroPlanePredictor.__call__] image is None or not tensor — returning None', flush=True)
             return None
 
         sem_seg_maps = []
@@ -341,15 +354,33 @@ class ZeroPlaneDefaultPredictorSoftTarget:
                 'anchor_normals': self.anchor_normals,
                 'anchor_offsets': self.anchor_offsets,
             }
+            if _verbose:
+                print('[ZeroPlanePredictor.__call__] img #{} np shape={} dtype={} min={:.1f} max={:.1f}'.format(
+                      len(sem_seg_maps), img_np.shape, img_np.dtype,
+                      float(img_np.min()), float(img_np.max())), flush=True)
             k_inv_dot_xy_1 = self._get_coordinate_map(h=h, w=w, oh=h, ow=w)
+            if _verbose:
+                print('[ZeroPlanePredictor.__call__] calling predictor...', flush=True)
             prediction = self.predictor(img_np, anchors, k_inv_dot_xy_1)
+            if _verbose:
+                print('[ZeroPlanePredictor.__call__] predictor returned type={} keys={}'.format(
+                      type(prediction).__name__,
+                      list(prediction.keys()) if isinstance(prediction, dict) else 'N/A'), flush=True)
             sem_seg = self._sem_seg_from_prediction(prediction)
+            if _verbose:
+                print('[ZeroPlanePredictor.__call__] sem_seg={}'.format(
+                      tuple(sem_seg.shape) if sem_seg is not None else None), flush=True)
             if sem_seg is not None:
                 sem_seg_maps.append(sem_seg)
 
         if len(sem_seg_maps) == 0:
+            if _verbose:
+                print('[ZeroPlanePredictor.__call__] no sem_seg maps produced — returning None', flush=True)
             return None
-        return torch.stack(sem_seg_maps, dim=0)
+        result = torch.stack(sem_seg_maps, dim=0)
+        if _verbose:
+            print('[ZeroPlanePredictor.__call__] returning stacked result shape={}'.format(tuple(result.shape)), flush=True)
+        return result
 
 
 def _normalize_sem_seg_teacher(teacher_logits):
@@ -370,7 +401,9 @@ def _normalize_sem_seg_teacher(teacher_logits):
 
 
 def build_zeroplane_soft_target_fn(config_path, config_opts=None, ckpt_path=''):
+    print('[build_zeroplane_soft_target_fn] config_path={} ckpt_path={}'.format(config_path, ckpt_path), flush=True)
     if not ckpt_path:
+        print('[build_zeroplane_soft_target_fn] no ckpt_path — returning None', flush=True)
         return None
 
     if not osp.isfile(ckpt_path):
@@ -382,28 +415,40 @@ def build_zeroplane_soft_target_fn(config_path, config_opts=None, ckpt_path=''):
     if osp.isdir(demo_root) and demo_root not in sys.path:
         sys.path.insert(0, demo_root)
 
+    print('[build_zeroplane_soft_target_fn] importing DefaultPredictor...', flush=True)
     try:
         from ZeroPlane.demo.predictor import DefaultPredictor
     except ImportError as exc:
         raise ImportError('Failed to import ZeroPlane demo DefaultPredictor: {}'.format(exc))
+    print('[build_zeroplane_soft_target_fn] DefaultPredictor imported OK', flush=True)
 
+    print('[build_zeroplane_soft_target_fn] building cfg...', flush=True)
     cfg = _build_zeroplane_cfg(config_path=config_path, config_opts=config_opts, ckpt_path=ckpt_path)
+    print('[build_zeroplane_soft_target_fn] cfg built. META_ARCHITECTURE={}'.format(
+          cfg.MODEL.META_ARCHITECTURE), flush=True)
+    print('[build_zeroplane_soft_target_fn] building DefaultPredictor (loads weights)...', flush=True)
     predictor = DefaultPredictor(cfg)
+    print('[build_zeroplane_soft_target_fn] DefaultPredictor ready', flush=True)
     return ZeroPlaneDefaultPredictorSoftTarget(predictor, zeroplane_root)
 
 
 def load_zeroplane_soft_target_fn(ckpt_path='', config_path='', config_opts=None):
+    print('[load_zeroplane_soft_target_fn] ckpt_path={} config_path={}'.format(ckpt_path, config_path), flush=True)
     if not ckpt_path:
+        print('[load_zeroplane_soft_target_fn] no ckpt_path — returning None', flush=True)
         return None
 
     if not osp.isfile(ckpt_path):
         raise FileNotFoundError('zeroplane_ckpt not found: {}'.format(ckpt_path))
+    print('[load_zeroplane_soft_target_fn] ckpt file exists OK', flush=True)
 
     soft_target_fn = build_zeroplane_soft_target_fn(
         config_path=config_path,
         config_opts=config_opts,
         ckpt_path=ckpt_path,
     )
+    print('[load_zeroplane_soft_target_fn] result type={}'.format(
+          type(soft_target_fn).__name__ if soft_target_fn is not None else None), flush=True)
     return soft_target_fn
 
 
@@ -538,10 +583,16 @@ def train():
             config_opts=effective_zeroplane_opts,
         )
         zeroplane_model = None
+        print('[PLANE_AUX] ZeroPlane soft-target fn loaded OK: {}'.format(
+            type(zeroplane_soft_target_fn).__name__), flush=True)
+        print('[PLANE_AUX] config={}, ckpt={}, device={}'.format(
+            effective_zeroplane_config, effective_zeroplane_ckpt, zeroplane_device), flush=True)
         if dist.get_rank() == 0:
             logger.info('Initialized zeroplane model from ckpt {} on {}'.format(effective_zeroplane_ckpt, zeroplane_device))
     else:
         zeroplane_soft_target_fn = None
+        if use_plane_aux:
+            print('[PLANE_AUX] WARNING: use_plane_aux=True but no ckpt found — soft-target fn is None', flush=True)
 
     print('[TRAIN] building BiSeNet (backbone={})...'.format(args.backbone), flush=True)
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
@@ -692,6 +743,10 @@ def train():
         net_out = net(im)
         plane_aux_out = None
         plane_aux_soft_target = None
+        if it == 0:
+            print('[PLANE_AUX] it=0 net_out type={}, len={}'.format(
+                type(net_out).__name__,
+                len(net_out) if isinstance(net_out, (tuple, list)) else 'N/A'), flush=True)
 
         if use_boundary_2 and use_boundary_4 and use_boundary_8:
             if use_plane_aux:
@@ -765,6 +820,11 @@ def train():
         # Plane auxiliary loss: distill the full 21-channel ZeroPlane sem_seg
         # output (20 plane slots + 1 non-plane slot) into the STDC aux head.
         plane_aux_loss = torch.tensor(0.0, device=im.device)
+        if it == 0 and use_plane_aux:
+            print('[PLANE_AUX] it=0 plane_aux_out={}, plane_aux_soft_target={}'.format(
+                tuple(plane_aux_out.shape) if plane_aux_out is not None else None,
+                tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None), flush=True)
+            print('[PLANE_AUX] plane_aux_loss_enabled={}'.format(plane_aux_loss_enabled), flush=True)
         if plane_aux_loss_enabled and plane_aux_out is not None and plane_aux_soft_target is not None:
             plane_aux_soft_target = plane_aux_soft_target.detach()
             if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
@@ -828,6 +888,12 @@ def train():
 
             loss_boundery_bce_avg = sum(loss_boundery_bce) / len(loss_boundery_bce)
             loss_boundery_dice_avg = sum(loss_boundery_dice) / len(loss_boundery_dice)
+            if use_plane_aux:
+                _teacher_fired = plane_aux_soft_target is not None
+                _aux_shape = tuple(plane_aux_out.shape) if plane_aux_out is not None else None
+                _tgt_shape = tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None
+                print('[PLANE_AUX] it={} teacher_fired={} aux_out={} soft_target={} loss_enabled={}'.format(
+                    it+1, _teacher_fired, _aux_shape, _tgt_shape, plane_aux_loss_enabled), flush=True)
             msg_items = [
                 'it: {it}/{max_it}',
                 'lr: {lr:4f}',
