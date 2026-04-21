@@ -93,7 +93,9 @@ python -m torch.distributed.launch \
 --n_workers_val 1 \
 --max_iter 60000 \
 --use_boundary_8 True \
---pretrain_path checkpoints/STDCNet813M_73.91.tar
+--pretrain_path checkpoints/STDCNet813M_73.91.tar \
+--plane_aux_loss_type ce_hard \
+--plane_loss_weight 0.4
 ```
 
 * Train STDC2Seg:
@@ -254,3 +256,70 @@ conda env update -n stdcseg18 -f ZeroPlane/environment.yml
 python -m pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 python -m pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 cd ZeroPlane/ZeroPlane/modeling/pixel_decoder/ops && sh make.sh
+
+python -m torch.distributed.launch --nproc_per_node=1 train.py --respath checkpoints/train_STDC1-Seg/ --backbone STDCNet813 --mode train --n_workers_train 12 --n_workers_val 1 --max_iter 60000 --use_boundary_8 True --pretrain_path checkpoints/STDCNet813M_73.91.tar --use_plane_aux True
+
+
+# Results
+## Orig
+mIOU50 is: 0.708587646484375, mIOU75 is: 0.7426185607910156
+maxmIOU50 is: 0.7101181745529175, maxmIOU75 is: 0.7476020455360413.
+
+## KL-Divergence
+mIOU50 is: 0.7082292437553406, mIOU75 is: 0.7413071990013123
+maxmIOU50 is: 0.7082292437553406, maxmIOU75 is: 0.7413071990013123.
+
+## ce_hard
+mIOU50 is: 0.690978467464447, mIOU75 is: 0.7247892022132874
+maxmIOU50 is: 0.6967727541923523, maxmIOU75 is: 0.7294437289237976.
+
+
+
+## Per class
+Per-class metrics:
+  class 00 (road): IoU=0.9772, Acc=0.9884
+  class 01 (sidewalk): IoU=0.8155, Acc=0.9052
+  class 02 (building): IoU=0.9029, Acc=0.9604
+  class 03 (wall): IoU=0.5814, Acc=0.6668
+  class 04 (fence): IoU=0.5175, Acc=0.6222
+  class 05 (pole): IoU=0.4814, Acc=0.5823
+  class 06 (traffic light): IoU=0.5618, Acc=0.6901
+  class 07 (traffic sign): IoU=0.6707, Acc=0.7511
+  class 08 (vegetation): IoU=0.9029, Acc=0.9522
+  class 09 (terrain): IoU=0.6054, Acc=0.7340
+  class 10 (sky): IoU=0.9306, Acc=0.9610
+  class 11 (person): IoU=0.7239, Acc=0.8483
+  class 12 (rider): IoU=0.5214, Acc=0.6551
+  class 13 (car): IoU=0.9280, Acc=0.9684
+  class 14 (truck): IoU=0.7043, Acc=0.7686
+  class 15 (bus): IoU=0.7807, Acc=0.8625
+  class 16 (train): IoU=0.7011, Acc=0.7623
+  class 17 (motorcycle): IoU=0.5030, Acc=0.5922
+  class 18 (bicycle): IoU=0.6824, Acc=0.8326
+
+
+# USing soft targets
+python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC1-Seg/ \
+  --backbone STDCNet813 \
+  --mode train \
+  --n_workers_train 10 \
+  --n_workers_val 1 \
+  --n_img_per_gpu 12 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --pretrain_path checkpoints/STDCNet813M_73.91.tar \
+  --use_plane_aux True \
+  --soft_targets_dir soft_targets \
+  --plane_loss_weight .4 \
+  --plane_aux_tap cp8 \
+  --plane_aux_mid 256 \
+  --plane_aux_loss_type ce_hard
+
+### Note: plane_aux_loss plateau (~0.0024–0.0025)
+
+This is expected, not a bug. ZeroPlane outputs soft, near-uniform distributions (e.g. one channel ~0.6, rest spread across 20 channels). Once the student head learns to roughly match this, the cfloor is ~0.002–0.005 and won't drop further — the target just isn't sharp enough to drive it lower.
+
+The useful signal is still flowing: gradients from the aux loss continue nudging backbone features toward geometrically structured representations. The payoff shows in final mIOU, not in the aux loss value.
+
+**To raise the floor (more gradient signal):** re-run `scripts/precompute_soft_targets.py` with temperature $\tau < 1$ (e.g. 0.5) applied to logits before softmax when saving `.npy` files. Sharper teacher → higher KL → stronger distillation. Only worth doing if final mIOU shows no improvement over the 0.710 baseline.

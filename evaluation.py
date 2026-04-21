@@ -32,7 +32,7 @@ class MscEvalV0(object):
             diter = enumerate(dl)
         else:
             diter = enumerate(tqdm(dl))
-        for i, (imgs, label) in diter:
+        for i, (imgs, label, *_) in diter:
 
             N, _, H, W = label.shape
 
@@ -73,11 +73,16 @@ def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', sc
     batchsize = 5
     n_workers = 2
     dsval = CityScapes(dspth, mode='val')
+    from torch.utils.data.dataloader import default_collate
+    def _eval_collate(batch):
+        ims, lbs, sts = zip(*batch)
+        return default_collate(list(ims)), default_collate(list(lbs)), None
     dl = DataLoader(dsval,
                     batch_size = batchsize,
                     shuffle = False,
                     num_workers = n_workers,
-                    drop_last = False)
+                    drop_last = False,
+                    collate_fn = _eval_collate)
 
     n_classes = 19
     print("backbone:", backbone)
