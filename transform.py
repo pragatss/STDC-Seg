@@ -6,6 +6,19 @@ from PIL import Image
 import PIL.ImageEnhance as ImageEnhance
 import random
 import numpy as np
+import cv2
+
+
+def _st_resize(st, new_h, new_w):
+    """Resize a (C, H, W) float numpy array with bilinear interpolation."""
+    if st is None:
+        return None
+    # cv2.resize operates on (H, W) or (H, W, C); transpose for multi-channel.
+    st_hwc = st.transpose(1, 2, 0).astype(np.float32)
+    resized = cv2.resize(st_hwc, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    if resized.ndim == 2:          # single-channel edge-case
+        resized = resized[:, :, np.newaxis]
+    return resized.transpose(2, 0, 1).astype(st.dtype)
 
 
 class RandomCrop(object):
@@ -15,22 +28,49 @@ class RandomCrop(object):
     def __call__(self, im_lb):
         im = im_lb['im']
         lb = im_lb['lb']
+        st = im_lb.get('st', None)
         assert im.size == lb.size
         W, H = self.size
         w, h = im.size
 
-        if (W, H) == (w, h): return dict(im=im, lb=lb)
+        if (W, H) == (w, h):
+            return dict(im=im, lb=lb, st=st)
+
         if w < W or h < H:
-            scale = float(W) / w if w < h else float(H) / h
-            w, h = int(scale * w + 1), int(scale * h + 1)
+            pad_scale = float(W) / w if w < h else float(H) / h
+            w, h = int(pad_scale * w + 1), int(pad_scale * h + 1)
             im = im.resize((w, h), Image.BILINEAR)
             lb = lb.resize((w, h), Image.NEAREST)
+            if st is not None:
+                new_st_h = max(1, int(st.shape[1] * pad_scale + 1))
+                new_st_w = max(1, int(st.shape[2] * pad_scale + 1))
+                st = _st_resize(st, new_st_h, new_st_w)
+
         sw, sh = random.random() * (w - W), random.random() * (h - H)
         crop = int(sw), int(sh), int(sw) + W, int(sh) + H
+
+        cropped_st = None
+        if st is not None:
+            # st is kept at 1/8 of the current image dimensions by RandomScale.
+            # Map image-space crop coords to st-space (divide by 8).
+            scale_y = st.shape[1] / h
+            scale_x = st.shape[2] / w
+            st_y1 = int(int(sh) * scale_y)
+            st_x1 = int(int(sw) * scale_x)
+            st_crop_h = max(1, int(H * scale_y))
+            st_crop_w = max(1, int(W * scale_x))
+            st_y2 = min(st_y1 + st_crop_h, st.shape[1])
+            st_x2 = min(st_x1 + st_crop_w, st.shape[2])
+            cropped = st[:, st_y1:st_y2, st_x1:st_x2]
+            # If the crop is too small (very aggressive down-scale), keep full st
+            # and let F.interpolate handle the resize inside the loss.
+            cropped_st = cropped if (cropped.shape[1] >= 4 and cropped.shape[2] >= 4) else st
+
         return dict(
-                im = im.crop(crop),
-                lb = lb.crop(crop)
-                    )
+            im=im.crop(crop),
+            lb=lb.crop(crop),
+            st=cropped_st,
+        )
 
 
 class HorizontalFlip(object):
@@ -40,29 +80,38 @@ class HorizontalFlip(object):
     def __call__(self, im_lb):
         if random.random() > self.p:
             return im_lb
-        else:
-            im = im_lb['im']
-            lb = im_lb['lb']
-            return dict(im = im.transpose(Image.FLIP_LEFT_RIGHT),
-                        lb = lb.transpose(Image.FLIP_LEFT_RIGHT),
-                    )
+        im = im_lb['im']
+        lb = im_lb['lb']
+        st = im_lb.get('st', None)
+        flipped_st = st[:, :, ::-1].copy() if st is not None else None
+        return dict(
+            im=im.transpose(Image.FLIP_LEFT_RIGHT),
+            lb=lb.transpose(Image.FLIP_LEFT_RIGHT),
+            st=flipped_st,
+        )
 
 
 class RandomScale(object):
     def __init__(self, scales=(1, ), *args, **kwargs):
         self.scales = scales
-        # print('scales: ', scales)
 
     def __call__(self, im_lb):
         im = im_lb['im']
         lb = im_lb['lb']
+        st = im_lb.get('st', None)
         W, H = im.size
         scale = random.choice(self.scales)
-        # scale = np.random.uniform(min(self.scales), max(self.scales))
         w, h = int(W * scale), int(H * scale)
-        return dict(im = im.resize((w, h), Image.BILINEAR),
-                    lb = lb.resize((w, h), Image.NEAREST),
-                )
+        scaled_st = None
+        if st is not None:
+            new_st_h = max(1, int(st.shape[1] * scale))
+            new_st_w = max(1, int(st.shape[2] * scale))
+            scaled_st = _st_resize(st, new_st_h, new_st_w)
+        return dict(
+            im=im.resize((w, h), Image.BILINEAR),
+            lb=lb.resize((w, h), Image.NEAREST),
+            st=scaled_st,
+        )
 
 
 class ColorJitter(object):
@@ -83,9 +132,8 @@ class ColorJitter(object):
         im = ImageEnhance.Brightness(im).enhance(r_brightness)
         im = ImageEnhance.Contrast(im).enhance(r_contrast)
         im = ImageEnhance.Color(im).enhance(r_saturation)
-        return dict(im = im,
-                    lb = lb,
-                )
+        # ColorJitter is spatial-invariant — pass soft target through unchanged.
+        return dict(im=im, lb=lb, st=im_lb.get('st', None))
 
 
 class MultiScale(object):

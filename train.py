@@ -124,6 +124,21 @@ def parse_args():
         default=64,
     )
     parse.add_argument(
+        '--plane_aux_loss_type',
+        dest='plane_aux_loss_type',
+        type=str,
+        default='mse',
+        choices=['kl', 'mse', 'ce_hard'],
+        help=(
+            'Loss function for the plane auxiliary head.\n'
+            '  mse     : MSE between student softmax probs and teacher probs.\n'
+            '            Recommended — does not collapse on near-uniform teachers.\n'
+            '  kl      : KL divergence (original). Plateaus ~0.0024 due to soft targets.\n'
+            '  ce_hard : Cross-entropy using argmax of teacher as hard label.\n'
+            '            Sharpest signal but discards inter-channel soft info.'
+        ),
+    )
+    parse.add_argument(
         '--plane_aux_soft_target_only_debug',
         dest='plane_aux_soft_target_only_debug',
         type=str2bool,
@@ -246,6 +261,17 @@ def parse_args():
             dest = 'use_boundary_16',
             type = str2bool,
             default = False,
+            )
+    parse.add_argument(
+            '--soft_targets_dir',
+            dest = 'soft_targets_dir',
+            type = str,
+            default = None,
+            help = 'Path to pre-computed ZeroPlane soft target .npy files '
+                   '(produced by scripts/precompute_soft_targets.py). '
+                   'When set, the live ZeroPlane teacher is NOT loaded, '
+                   'saving ~12 GB of VRAM and removing per-iteration teacher '
+                   'forward passes entirely.',
             )
     return parse.parse_args()
 
@@ -464,6 +490,26 @@ def _extract_model_weights_from_opts(opts):
     return ''
 
 
+def _collate_st_aware(batch):
+    """
+    Custom collate that handles batches containing None soft targets.
+    When soft_targets_dir is not set (or some files are missing), the
+    dataloader returns None for individual soft_target items.  PyTorch's
+    default_collate cannot handle mixed tensor / None lists, so we deal
+    with the None case here and fall back to default_collate for tensors.
+    """
+    from torch.utils.data.dataloader import default_collate
+    ims, lbs, sts = zip(*batch)
+    ims_col = default_collate(list(ims))
+    lbs_col = default_collate(list(lbs))
+    if all(s is None for s in sts):
+        return ims_col, lbs_col, None
+    # Some files missing — fill with zeros matching the first valid tensor.
+    valid = next(s for s in sts if s is not None)
+    sts_filled = [s if s is not None else torch.zeros_like(valid) for s in sts]
+    return ims_col, lbs_col, default_collate(sts_filled)
+
+
 def train():
     print('[TRAIN] train() start', flush=True)
     args = parse_args()
@@ -529,13 +575,16 @@ def train():
         logger.info('plane_aux_tap: {}'.format(args.plane_aux_tap))
         logger.info('plane_aux_mid: {}'.format(args.plane_aux_mid))
         logger.info('plane_loss_weight: {}'.format(args.plane_loss_weight))
+        logger.info('plane_aux_loss_type: {}'.format(args.plane_aux_loss_type))
         logger.info('mode: {}'.format(args.mode))
         logger.info('demo config_file: {}'.format(args.config_file))
         logger.info('demo opts: {}'.format(args.opts if args.opts else 'None'))
-    
-    
+        logger.info('soft_targets_dir: {}'.format(args.soft_targets_dir))
+
+
     print('[TRAIN] building CityScapes dataset (train)...', flush=True)
-    ds = CityScapes(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale)
+    ds = CityScapes(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale,
+                    soft_targets_dir=args.soft_targets_dir)
     print('[TRAIN] CityScapes train dataset ready ({} samples)'.format(len(ds)), flush=True)
     sampler = torch.utils.data.distributed.DistributedSampler(ds)
     dl = DataLoader(ds,
@@ -544,7 +593,8 @@ def train():
                     sampler = sampler,
                     num_workers = n_workers_train,
                     pin_memory = False,
-                    drop_last = True)
+                    drop_last = True,
+                    collate_fn = _collate_st_aware)
     # exit(0)
     print('[TRAIN] building CityScapes dataset (val)...', flush=True)
     dsval = CityScapes(dspth, mode='val', randomscale=randomscale)
@@ -555,7 +605,8 @@ def train():
                     shuffle = False,
                     sampler = sampler_val,
                     num_workers = n_workers_val,
-                    drop_last = False)
+                    drop_last = False,
+                    collate_fn = _collate_st_aware)
 
     ## model
     # ---------------------------------------------------------------
@@ -574,7 +625,17 @@ def train():
     effective_zeroplane_ckpt = _extract_model_weights_from_opts(effective_zeroplane_opts)
 
     print('[TRAIN] use_plane_aux={}, ckpt={}'.format(use_plane_aux, effective_zeroplane_ckpt), flush=True)
-    if use_plane_aux and effective_zeroplane_ckpt:
+    using_cached_soft_targets = use_plane_aux and (args.soft_targets_dir is not None)
+    if using_cached_soft_targets:
+        # Soft targets are pre-computed — skip loading the heavy ZeroPlane teacher
+        # entirely.  This saves ~12 GB of VRAM and removes all per-iteration
+        # ViT-L forward passes.
+        zeroplane_soft_target_fn = None
+        print('[PLANE_AUX] using pre-computed soft targets from {} — skipping live teacher'.format(
+              args.soft_targets_dir), flush=True)
+        if dist.get_rank() == 0:
+            logger.info('plane_aux: using cached soft targets from {}'.format(args.soft_targets_dir))
+    elif use_plane_aux and effective_zeroplane_ckpt:
         zeroplane_device = 'cuda:{}'.format(args.local_rank)
         print('[TRAIN] loading ZeroPlane soft-target model...', flush=True)
         zeroplane_soft_target_fn = load_zeroplane_soft_target_fn(
@@ -713,17 +774,27 @@ def train():
     epoch = 0
     for it in range(max_iter):
         try:
-            im, lb = next(diter)
+            im, lb, cached_st = next(diter)
             if not im.size()[0]==n_img_per_gpu: raise StopIteration
         except StopIteration:
             epoch += 1
             sampler.set_epoch(epoch)
             diter = iter(dl)
-            im, lb = next(diter)
+            im, lb, cached_st = next(diter)
         im = im.cuda()
         lb = lb.cuda()
         H, W = im.size()[2:]
         lb = torch.squeeze(lb, 1)
+
+        # When using pre-computed soft targets, move them to GPU now.
+        # cached_st is None for val/non-plane-aux runs (dataloader returns None).
+        if cached_st is not None:
+            # Filter out None entries (some images may have no cached ST).
+            valid = [s for s in cached_st if s is not None]
+            if valid:
+                cached_st = torch.stack(valid, dim=0).cuda()
+            else:
+                cached_st = None
 
         optim.zero_grad()  # clear gradients from the previous iteration
 
@@ -748,6 +819,11 @@ def train():
                 type(net_out).__name__,
                 len(net_out) if isinstance(net_out, (tuple, list)) else 'N/A'), flush=True)
 
+        # When using cached soft targets the model returns plane_aux_soft_target=None
+        # (no live teacher).  Substitute the dataloader-provided cached version.
+        if it == 0 and using_cached_soft_targets:
+            print('[PLANE_AUX] using_cached_soft_targets mode — cached_st={}'.format(
+                tuple(cached_st.shape) if cached_st is not None else None), flush=True)
         if use_boundary_2 and use_boundary_4 and use_boundary_8:
             if use_plane_aux:
                 out, out16, out32, detail2, detail4, detail8, plane_aux_out, plane_aux_soft_target = net_out
@@ -771,6 +847,12 @@ def train():
                 out, out16, out32, plane_aux_out, plane_aux_soft_target = net_out
             else:
                 out, out16, out32 = net_out
+
+        # Override model-generated soft target with the pre-computed cached one.
+        # The model returns plane_aux_soft_target=None when no live teacher is
+        # loaded; cached_st is None when soft_targets_dir was not provided.
+        if using_cached_soft_targets and cached_st is not None:
+            plane_aux_soft_target = cached_st
 
         # ---------------------------------------------------------------
         # Segmentation loss — "how wrong were we at labelling each pixel?"
@@ -843,15 +925,37 @@ def train():
                 )
 
             teacher_probs = _normalize_sem_seg_teacher(plane_aux_soft_target)
-            student_log_probs = F.log_softmax(plane_aux_out, dim=1)
-            valid_mask = (lb != ignore_idx).unsqueeze(1)
+            valid_mask = (lb != ignore_idx).unsqueeze(1)  # (B,1,H,W)
             if valid_mask.any():
-                plane_aux_loss_map = F.kl_div(
-                    student_log_probs,
-                    teacher_probs,
-                    reduction='none',
-                ).sum(dim=1, keepdim=True)
-                plane_aux_loss = plane_aux_loss_map[valid_mask].mean()
+                _loss_type = args.plane_aux_loss_type
+                if _loss_type == 'mse':
+                    # MSE between student softmax and teacher probs.
+                    # Gradient = 2*(Q-P) per element — does NOT collapse on
+                    # near-uniform teachers, unlike KL div.
+                    student_probs = F.softmax(plane_aux_out, dim=1)
+                    diff_sum = ((student_probs - teacher_probs) ** 2).sum(dim=1, keepdim=True)
+                    plane_aux_loss = diff_sum[valid_mask].mean()
+                elif _loss_type == 'ce_hard':
+                    # Hard cross-entropy: convert teacher to a single argmax label.
+                    # Sharpest gradient signal; discards inter-channel soft info.
+                    hard_label = teacher_probs.argmax(dim=1).long()  # (B,H,W)
+                    # Mask out Cityscapes "don't care" pixels so they don't
+                    # contribute to the plane loss either.
+                    hard_label[lb == ignore_idx] = ignore_idx
+                    plane_aux_loss = F.cross_entropy(
+                        plane_aux_out,
+                        hard_label,
+                        ignore_index=ignore_idx,
+                        reduction='mean',
+                    )
+                else:  # 'kl' — original behaviour
+                    student_log_probs = F.log_softmax(plane_aux_out, dim=1)
+                    plane_aux_loss_map = F.kl_div(
+                        student_log_probs,
+                        teacher_probs,
+                        reduction='none',
+                    ).sum(dim=1, keepdim=True)
+                    plane_aux_loss = plane_aux_loss_map[valid_mask].mean()
 
         # ---------------------------------------------------------------
         # Total loss = segmentation losses + boundary losses (Paper Eq. 3 / §4)
