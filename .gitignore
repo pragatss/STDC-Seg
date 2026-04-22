@@ -6,3 +6,5 @@ loss/*
 models/*
 modules/*
 nets/*
+data/*
+soft_targets/*

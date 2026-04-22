@@ -17,13 +17,15 @@ from transform import *
 
 
 class CityScapes(Dataset):
-    def __init__(self, rootpth, cropsize=(640, 480), mode='train', 
-    randomscale=(0.125, 0.25, 0.375, 0.5, 0.675, 0.75, 0.875, 1.0, 1.25, 1.5), *args, **kwargs):
+    def __init__(self, rootpth, cropsize=(640, 480), mode='train',
+    randomscale=(0.125, 0.25, 0.375, 0.5, 0.675, 0.75, 0.875, 1.0, 1.25, 1.5),
+    soft_targets_dir=None, *args, **kwargs):
         super(CityScapes, self).__init__(*args, **kwargs)
         assert mode in ('train', 'val', 'test', 'trainval')
         self.mode = mode
         print('self.mode', self.mode)
         self.ignore_lb = 255
+        self.soft_targets_dir = soft_targets_dir
 
         with open('./cityscapes_info.json', 'r') as fr:
             labels_info = json.load(fr)
@@ -64,6 +66,25 @@ class CityScapes(Dataset):
         assert set(self.imnames) == set(self.imgs.keys())
         assert set(self.imnames) == set(self.labels.keys())
 
+        ## build soft-target path map (optional)
+        self.soft_target_paths = {}
+        if soft_targets_dir is not None:
+            st_mode_dir = osp.join(soft_targets_dir, mode)
+            if osp.isdir(st_mode_dir):
+                for fd in os.listdir(st_mode_dir):
+                    fdpth = osp.join(st_mode_dir, fd)
+                    if not osp.isdir(fdpth):
+                        continue
+                    for fname in os.listdir(fdpth):
+                        if fname.endswith('.npy'):
+                            name = fname[:-4]  # strip .npy
+                            self.soft_target_paths[name] = osp.join(fdpth, fname)
+                print('soft_targets_dir: found {} soft target files for split={}'.format(
+                      len(self.soft_target_paths), mode))
+            else:
+                print('WARNING: soft_targets_dir={} does not contain split dir {}'.format(
+                      soft_targets_dir, mode))
+
         ## pre-processing
         self.to_tensor = transforms.Compose([
             transforms.ToTensor(),
@@ -90,14 +111,28 @@ class CityScapes(Dataset):
         lbpth = self.labels[fn]
         img = Image.open(impth).convert('RGB')
         label = Image.open(lbpth)
+
+        # Load cached soft target (.npy) if available for this image.
+        soft_target = None
+        if self.soft_target_paths and fn in self.soft_target_paths:
+            st_arr = np.load(self.soft_target_paths[fn]).astype(np.float32)  # (21, H_st, W_st)
+            soft_target = st_arr
+
         if self.mode == 'train' or self.mode == 'trainval':
-            im_lb = dict(im = img, lb = label)
+            im_lb = dict(im=img, lb=label, st=soft_target)
             im_lb = self.trans_train(im_lb)
-            img, label = im_lb['im'], im_lb['lb']
+            img, label, soft_target = im_lb['im'], im_lb['lb'], im_lb.get('st', None)
         img = self.to_tensor(img)
         label = np.array(label).astype(np.int64)[np.newaxis, :]
         label = self.convert_labels(label)
-        return img, label
+
+        # Convert soft target to float32 tensor if it was loaded.
+        if soft_target is not None:
+            soft_target = torch.from_numpy(
+                np.ascontiguousarray(soft_target).astype(np.float32)
+            )  # (21, H_st, W_st)
+
+        return img, label, soft_target
 
 
     def __len__(self):
@@ -115,7 +150,7 @@ if __name__ == "__main__":
     from tqdm import tqdm
     ds = CityScapes('./data/', n_classes=19, mode='val')
     uni = []
-    for im, lb in tqdm(ds):
+    for im, lb, *_ in tqdm(ds):
         lb_uni = np.unique(lb).tolist()
         uni.extend(lb_uni)
     print(uni)

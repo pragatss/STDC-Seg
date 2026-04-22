@@ -121,30 +121,54 @@ class PlaneAuxHead(nn.Module):
         self.pred_head = BiSeNetOutput(in_chan, mid_chan, n_classes)
         self.zeroplane_model = zeroplane_model
         self.zeroplane_soft_target_fn = zeroplane_soft_target_fn
+        self._fwd_call_count = 0  # used to gate verbose per-iter logs
+        print('[PlaneAuxHead.__init__] in_chan={}, mid_chan={}, n_classes={}, '
+              'zeroplane_model={}, zeroplane_soft_target_fn={}'.format(
+              in_chan, mid_chan, n_classes,
+              type(zeroplane_model).__name__ if zeroplane_model is not None else None,
+              type(zeroplane_soft_target_fn).__name__ if zeroplane_soft_target_fn is not None else None),
+              flush=True)
 
         if isinstance(self.zeroplane_model, nn.Module):
             self.zeroplane_model.eval()
+            print('[PlaneAuxHead.__init__] zeroplane_model set to eval()', flush=True)
             # for param in self.zeroplane_model.parameters():
             #     param.requires_grad = False
     
     def _predict_zeroplane_soft_target(self, image=None, zeroplane_inputs=None, pred_logits=None):
+        _verbose = (self._fwd_call_count <= 1)
         if self.zeroplane_soft_target_fn is not None:
+            if _verbose:
+                print('[PlaneAuxHead._predict] calling zeroplane_soft_target_fn '
+                      '(image shape={})'.format(
+                      tuple(image.shape) if torch.is_tensor(image) else None), flush=True)
             soft_target = self.zeroplane_soft_target_fn(
                 image=image,
                 zeroplane_inputs=zeroplane_inputs,
                 pred_logits=pred_logits,
             )
             if soft_target is None:
+                if _verbose:
+                    print('[PlaneAuxHead._predict] zeroplane_soft_target_fn returned None', flush=True)
                 return None
             if torch.is_tensor(soft_target):
                 if soft_target.ndim == 2:
                     soft_target = soft_target.unsqueeze(0).unsqueeze(0)
                 elif soft_target.ndim == 3:
                     soft_target = soft_target.unsqueeze(0)
-                return torch.clamp(soft_target.float(), 0.0, 1.0)
+                soft_target = torch.clamp(soft_target.float(), 0.0, 1.0)
+                if _verbose:
+                    print('[PlaneAuxHead._predict] soft_target shape={} min={:.4f} max={:.4f}'.format(
+                          tuple(soft_target.shape), soft_target.min().item(), soft_target.max().item()),
+                          flush=True)
+                return soft_target
+            if _verbose:
+                print('[PlaneAuxHead._predict] soft_target_fn returned non-tensor: {}'.format(type(soft_target)), flush=True)
             return None
 
         if self.zeroplane_model is None:
+            if _verbose:
+                print('[PlaneAuxHead._predict] no soft_target_fn and no zeroplane_model — returning None', flush=True)
             return None
 
         model_inputs = zeroplane_inputs
@@ -152,8 +176,12 @@ class PlaneAuxHead(nn.Module):
             model_inputs = [{"image": img} for img in image]
 
         if model_inputs is None:
+            if _verbose:
+                print('[PlaneAuxHead._predict] model_inputs is None — returning None', flush=True)
             return None
 
+        if _verbose:
+            print('[PlaneAuxHead._predict] calling zeroplane_model with {} inputs'.format(len(model_inputs)), flush=True)
         outputs = self.zeroplane_model(model_inputs)
         if torch.is_tensor(outputs):
             plane = outputs.float()
@@ -161,14 +189,28 @@ class PlaneAuxHead(nn.Module):
                 plane = plane.unsqueeze(0).unsqueeze(0)
             elif plane.ndim == 3:
                 plane = plane.unsqueeze(0)
-            return torch.clamp(plane, 0.0, 1.0)
+            plane = torch.clamp(plane, 0.0, 1.0)
+            if _verbose:
+                print('[PlaneAuxHead._predict] zeroplane_model output shape={}'.format(tuple(plane.shape)), flush=True)
+            return plane
+        if _verbose:
+            print('[PlaneAuxHead._predict] zeroplane_model returned non-tensor: {}'.format(type(outputs)), flush=True)
         return None
 
     def forward(self, feat, image=None, zeroplane_inputs=None):
+        self._fwd_call_count += 1
+        _verbose = (self._fwd_call_count <= 2)
+        if _verbose:
+            print('[PlaneAuxHead.forward] call #{} feat.shape={}'.format(
+                  self._fwd_call_count, tuple(feat.shape)), flush=True)
         pred_logits = self.pred_head(feat)
+        if _verbose:
+            print('[PlaneAuxHead.forward] pred_logits.shape={}'.format(tuple(pred_logits.shape)), flush=True)
         soft_target = None
 
         with torch.no_grad():
+            if _verbose:
+                print('[PlaneAuxHead.forward] entering _predict_zeroplane_soft_target...', flush=True)
             soft_target = self._predict_zeroplane_soft_target(
                 image=image,
                 zeroplane_inputs=zeroplane_inputs,
@@ -178,6 +220,9 @@ class PlaneAuxHead(nn.Module):
             if soft_target is not None:
                 soft_target = soft_target.to(pred_logits.device, dtype=pred_logits.dtype)
                 if soft_target.shape[-2:] != pred_logits.shape[-2:]:
+                    if _verbose:
+                        print('[PlaneAuxHead.forward] resizing soft_target {} -> {}'.format(
+                              tuple(soft_target.shape[-2:]), tuple(pred_logits.shape[-2:])), flush=True)
                     soft_target = F.interpolate(
                         soft_target,
                         size=pred_logits.shape[-2:],
@@ -185,6 +230,13 @@ class PlaneAuxHead(nn.Module):
                         align_corners=True,
                     )
                 soft_target = torch.clamp(soft_target, 0.0, 1.0)
+                if _verbose:
+                    print('[PlaneAuxHead.forward] final soft_target shape={} min={:.4f} max={:.4f}'.format(
+                          tuple(soft_target.shape), soft_target.min().item(), soft_target.max().item()),
+                          flush=True)
+            else:
+                if _verbose:
+                    print('[PlaneAuxHead.forward] soft_target is None', flush=True)
 
         return pred_logits, soft_target
 
@@ -523,12 +575,20 @@ class  BiSeNet(nn.Module):
                 plane_feat = feat_res8
             else:
                 plane_feat = feat_res16
+            if self.plane_aux_head._fwd_call_count < 2:
+                print('[BiSeNet.forward] plane_aux_tap={} plane_feat.shape={}'.format(
+                      self.plane_aux_tap, tuple(plane_feat.shape)), flush=True)
 
             plane_aux_logits, plane_aux_soft_target = self.plane_aux_head(
                 plane_feat,
                 image=x,
                 zeroplane_inputs=zeroplane_inputs,
             )
+            if self.plane_aux_head._fwd_call_count <= 2:
+                print('[BiSeNet.forward] after plane_aux_head: logits={}, soft_target={}'.format(
+                      tuple(plane_aux_logits.shape) if plane_aux_logits is not None else None,
+                      tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None),
+                      flush=True)
             if self.plane_aux_soft_target_only_debug:
                 plane_aux_logits = None
             else:
