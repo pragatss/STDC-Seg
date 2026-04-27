@@ -323,3 +323,24 @@ This is expected, not a bug. ZeroPlane outputs soft, near-uniform distributions 
 The useful signal is still flowing: gradients from the aux loss continue nudging backbone features toward geometrically structured representations. The payoff shows in final mIOU, not in the aux loss value.
 
 **To raise the floor (more gradient signal):** re-run `scripts/precompute_soft_targets.py` with temperature $\tau < 1$ (e.g. 0.5) applied to logits before softmax when saving `.npy` files. Sharper teacher → higher KL → stronger distillation. Only worth doing if final mIOU shows no improvement over the 0.710 baseline.
+
+
+cd /home/husky/Downloads/Pragat/STDC-Seg-Mod && python scripts/precompute_soft_targets.py \
+  --data_root ./data \
+  --out_dir ./soft_targets_test \
+  --config ZeroPlane/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml \
+  --opts MODEL.WEIGHTS ./checkpoints/dust3r_encoder_released.pth \
+  --max_images 1
+
+
+  python /home/husky/Downloads/Pragat/STDC-Seg-Mod/scripts/compare_soft_target_npy.py \
+  --npy /home/husky/Downloads/Pragat/STDC-Seg-Mod/soft_targets_test/train/bremen/bremen_000000_000019.npy \
+  --out /home/husky/Downloads/Pragat/STDC-Seg-Mod/scripts/bremen_test_blend.png
+
+  cd /home/husky/Downloads/Pragat/STDC-Seg-Mod && python scripts/precompute_soft_targets.py \
+  --data_root ./data \
+  --out_dir ./soft_targets \
+  --config ZeroPlane/configs/ZeroPlaneNYUV2/dust3r_large_dpt_bs16_50ep.yaml \
+  --opts MODEL.WEIGHTS ./checkpoints/dust3r_encoder_released.pth \
+  --max_images 0 \
+  --resume

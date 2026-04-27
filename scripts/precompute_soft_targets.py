@@ -44,6 +44,24 @@ INFER_H = 512
 INFER_W = 1024
 
 
+def _resolve_repo_path(path, repo_root, zeroplane_root=None):
+    """Resolve a possibly-relative path against the repo, then ZeroPlane."""
+    if not path or osp.isabs(path):
+        return path
+
+    candidates = [
+        osp.join(repo_root, path),
+    ]
+    if zeroplane_root is not None:
+        candidates.append(osp.join(zeroplane_root, path))
+
+    for candidate in candidates:
+        if osp.exists(candidate):
+            return candidate
+
+    return osp.join(repo_root, path)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description='Pre-compute ZeroPlane soft targets')
     p.add_argument('--data_root', type=str, default='./data',
@@ -62,6 +80,8 @@ def parse_args():
                    help='Device for ZeroPlane inference')
     p.add_argument('--resume', action='store_true',
                    help='Skip images whose .npy already exists')
+    p.add_argument('--max_images', type=int, default=0,
+                   help='Stop after this many images (0 = process all); use 1 for a quick test')
     return p.parse_args()
 
 
@@ -143,6 +163,25 @@ def main():
 
     repo_root = osp.dirname(osp.dirname(osp.abspath(__file__)))
     zeroplane_root = osp.join(repo_root, 'ZeroPlane')
+
+    args.data_root = _resolve_repo_path(args.data_root, repo_root)
+    args.out_dir = _resolve_repo_path(args.out_dir, repo_root)
+    args.config = _resolve_repo_path(args.config, repo_root, zeroplane_root)
+
+    if args.opts:
+        resolved_opts = []
+        idx = 0
+        while idx < len(args.opts):
+            key = args.opts[idx]
+            resolved_opts.append(key)
+            if idx + 1 < len(args.opts):
+                value = args.opts[idx + 1]
+                if key.endswith('WEIGHTS'):
+                    value = _resolve_repo_path(value, repo_root, zeroplane_root)
+                resolved_opts.append(value)
+            idx += 2
+        args.opts = resolved_opts
+
     device = args.device
 
     print('[precompute] Loading ZeroPlane predictor...', flush=True)
@@ -186,6 +225,35 @@ def main():
                 failed += 1
                 continue
 
+            print('[precompute] raw sem_seg shape : {}'.format(tuple(sem_seg.shape)), flush=True)
+            print('[precompute] raw sem_seg dtype : {}'.format(sem_seg.dtype), flush=True)
+            print('[precompute] raw sem_seg min/max: {:.4f} / {:.4f}'.format(
+                float(sem_seg.min()), float(sem_seg.max())), flush=True)
+
+            # Channel 20 = non-plane in ZeroPlane's output.
+            # Find pixels where non-plane channel is the argmax and report them.
+            argmax = sem_seg.argmax(dim=0)  # (H, W)
+            nonplane_mask = (argmax == 20)  # True where non-plane dominates
+            nonplane_frac = float(nonplane_mask.float().mean()) * 100.0
+            print('[precompute] non-plane pixels (ch20 argmax): {:.1f}%'.format(nonplane_frac), flush=True)
+
+            # Zero out channel 20 and replace non-plane pixels with a uniform
+            # distribution across the 20 plane channels so they produce ~zero
+            # KL loss and don't pollute distillation.
+            sem_seg[20] = 0.0
+            uniform_val = 1.0 / 20.0
+            nonplane_mask_expanded = nonplane_mask.unsqueeze(0).expand_as(sem_seg)  # (21, H, W)
+            uniform = torch.full_like(sem_seg, uniform_val)
+            uniform[20] = 0.0  # keep non-plane channel at 0
+            sem_seg = torch.where(nonplane_mask_expanded, uniform, sem_seg)
+
+            # Re-normalise so each pixel's 20 plane channels sum to 1.
+            channel_sum = sem_seg.sum(dim=0, keepdim=True).clamp(min=1e-6)
+            sem_seg = sem_seg / channel_sum
+
+            print('[precompute] after masking min/max: {:.4f} / {:.4f}'.format(
+                float(sem_seg.min()), float(sem_seg.max())), flush=True)
+
             # Downsample from (21, INFER_H, INFER_W) to (21, ST_H, ST_W).
             sem_seg_small = torch.nn.functional.interpolate(
                 sem_seg.unsqueeze(0),
@@ -193,6 +261,9 @@ def main():
                 mode='bilinear',
                 align_corners=True,
             ).squeeze(0)
+
+            print('[precompute] downsampled shape : {}'.format(tuple(sem_seg_small.shape)), flush=True)
+            print('[precompute] saving to         : {}'.format(out_path), flush=True)
 
             # Save as float16 to halve storage (~1.4 MB per file, ~4 GB total).
             np.save(out_path, sem_seg_small.numpy().astype(np.float16))
@@ -202,8 +273,15 @@ def main():
                 print('[precompute] {}/{} done  ({} skipped, {} failed)'.format(
                       done + skipped, total, skipped, failed), flush=True)
 
+            if args.max_images > 0 and done >= args.max_images:
+                print('[precompute] max_images={} reached, stopping early.'.format(args.max_images), flush=True)
+                break
+
             # Free VRAM between images.
             torch.cuda.empty_cache()
+
+        if args.max_images > 0 and done >= args.max_images:
+            break
 
     print('[precompute] Finished. done={} skipped={} failed={} total={}'.format(
           done, skipped, failed, total), flush=True)
