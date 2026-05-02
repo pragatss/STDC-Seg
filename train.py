@@ -39,7 +39,13 @@ import argparse
 import sys
 import numpy as np
 
+try:
+    from scipy.optimize import linear_sum_assignment
+except Exception:
+    linear_sum_assignment = None
+
 logger = logging.getLogger()
+_PERM_FALLBACK_WARNED = False
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -112,6 +118,14 @@ def parse_args():
         default=1.0,
     )
     parse.add_argument(
+        '--plane_aux_start_iter',
+        dest='plane_aux_start_iter',
+        type=int,
+        default=0,
+        help='Delay plane aux loss until this iteration (default 0 = always on). '
+             'Set to e.g. 15000 to let the student warm up before Hungarian matching.',
+    )
+    parse.add_argument(
         '--plane_aux_tap',
         dest='plane_aux_tap',
         type=str,
@@ -128,14 +142,18 @@ def parse_args():
         dest='plane_aux_loss_type',
         type=str,
         default='mse',
-        choices=['kl', 'mse', 'ce_hard'],
+        choices=['kl', 'mse', 'ce_hard', 'perm_kl', 'perm_mse', 'perm_ce_hard', 'plane_geo'],
         help=(
             'Loss function for the plane auxiliary head.\n'
-            '  mse     : MSE between student softmax probs and teacher probs.\n'
-            '            Recommended — does not collapse on near-uniform teachers.\n'
-            '  kl      : KL divergence (original). Plateaus ~0.0024 due to soft targets.\n'
-            '  ce_hard : Cross-entropy using argmax of teacher as hard label.\n'
-            '            Sharpest signal but discards inter-channel soft info.'
+            '  mse         : MSE between student softmax probs and teacher probs.\n'
+            '  kl          : KL divergence. Plateaus ~0.0024 due to soft targets.\n'
+            '  ce_hard     : Cross-entropy using argmax of teacher as hard label.\n'
+            '  perm_kl/mse : Hungarian-matched variants of kl/mse.\n'
+            '  plane_geo   : Permutation-invariant two-term loss (RECOMMENDED).\n'
+            '                Term 1 — BCE on non-plane channel (globally consistent).\n'
+            '                Term 2 — MSE on total planar confidence map (sum of plane slots).\n'
+            '                Teaches WHERE planes exist, not which slot they occupy.\n'
+            '                Magnitude ~0.5, same scale as boundary losses.'
         ),
     )
     parse.add_argument(
@@ -426,6 +444,61 @@ def _normalize_sem_seg_teacher(teacher_logits):
     return teacher_probs
 
 
+def _match_plane_channels_hungarian(student_probs, teacher_probs, valid_mask, plane_channels=20):
+    """
+    Align teacher plane channels to student channels per image using Hungarian
+    matching on pairwise channel MSE. The final (non-plane) channel is kept
+    fixed and never permuted.
+    """
+    global _PERM_FALLBACK_WARNED
+
+    if plane_channels <= 1:
+        return teacher_probs
+
+    bsz = teacher_probs.shape[0]
+    aligned = teacher_probs.clone()
+
+    for b in range(bsz):
+        pix_mask = valid_mask[b, 0].reshape(-1)
+        if torch.count_nonzero(pix_mask) == 0:
+            continue
+
+        s = student_probs[b, :plane_channels].reshape(plane_channels, -1)[:, pix_mask]
+        t = teacher_probs[b, :plane_channels].reshape(plane_channels, -1)[:, pix_mask]
+
+        # Pairwise MSE matrix between student-plane channels and teacher-plane channels.
+        n_pix = float(s.shape[1])
+        s2 = (s * s).sum(dim=1, keepdim=True) / n_pix
+        t2 = (t * t).sum(dim=1, keepdim=True).t() / n_pix
+        cross = torch.matmul(s, t.t()) / n_pix
+        cost = s2 + t2 - 2.0 * cross
+
+        if linear_sum_assignment is not None:
+            row_ind, col_ind = linear_sum_assignment(cost.detach().cpu().numpy())
+            perm = torch.empty(plane_channels, dtype=torch.long, device=teacher_probs.device)
+            perm[row_ind] = torch.as_tensor(col_ind, dtype=torch.long, device=teacher_probs.device)
+        else:
+            if (not _PERM_FALLBACK_WARNED) and dist.is_initialized() and dist.get_rank() == 0:
+                logger.warning('scipy.optimize.linear_sum_assignment unavailable; using greedy fallback for permutation matching')
+                _PERM_FALLBACK_WARNED = True
+            elif not _PERM_FALLBACK_WARNED:
+                logger.warning('scipy.optimize.linear_sum_assignment unavailable; using greedy fallback for permutation matching')
+                _PERM_FALLBACK_WARNED = True
+            # Greedy fallback if scipy is unavailable.
+            perm = torch.empty(plane_channels, dtype=torch.long, device=teacher_probs.device)
+            used = torch.zeros(plane_channels, dtype=torch.bool, device=teacher_probs.device)
+            for i in range(plane_channels):
+                row = cost[i].clone()
+                row[used] = float('inf')
+                j = torch.argmin(row)
+                perm[i] = j
+                used[j] = True
+
+        aligned[b, :plane_channels] = teacher_probs[b, perm]
+
+    return aligned
+
+
 def build_zeroplane_soft_target_fn(config_path, config_opts=None, ckpt_path=''):
     print('[build_zeroplane_soft_target_fn] config_path={} ckpt_path={}'.format(config_path, ckpt_path), flush=True)
     if not ckpt_path:
@@ -575,6 +648,7 @@ def train():
         logger.info('plane_aux_tap: {}'.format(args.plane_aux_tap))
         logger.info('plane_aux_mid: {}'.format(args.plane_aux_mid))
         logger.info('plane_loss_weight: {}'.format(args.plane_loss_weight))
+        logger.info('plane_aux_start_iter: {}'.format(args.plane_aux_start_iter))
         logger.info('plane_aux_loss_type: {}'.format(args.plane_aux_loss_type))
         logger.info('mode: {}'.format(args.mode))
         logger.info('demo config_file: {}'.format(args.config_file))
@@ -907,7 +981,7 @@ def train():
                 tuple(plane_aux_out.shape) if plane_aux_out is not None else None,
                 tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None), flush=True)
             print('[PLANE_AUX] plane_aux_loss_enabled={}'.format(plane_aux_loss_enabled), flush=True)
-        if plane_aux_loss_enabled and plane_aux_out is not None and plane_aux_soft_target is not None:
+        if plane_aux_loss_enabled and it >= args.plane_aux_start_iter and plane_aux_out is not None and plane_aux_soft_target is not None:
             plane_aux_soft_target = plane_aux_soft_target.detach()
             if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
                 plane_aux_soft_target = F.interpolate(
@@ -925,20 +999,132 @@ def train():
                 )
 
             teacher_probs = _normalize_sem_seg_teacher(plane_aux_soft_target)
+            # Raw (un-normalised) teacher values clamped to [0,1].
+            # Used by plane_geo so each channel is treated as an independent
+            # soft binary mask, mirroring criterion.py in ZeroPlane.
+            teacher_raw = torch.clamp(plane_aux_soft_target, 0.0, 1.0)
             valid_mask = (lb != ignore_idx).unsqueeze(1)  # (B,1,H,W)
             if valid_mask.any():
                 _loss_type = args.plane_aux_loss_type
-                if _loss_type == 'mse':
+                teacher_probs_eff = teacher_probs
+                if _loss_type.startswith('perm_'):
+                    with torch.no_grad():
+                        student_probs_for_match = F.softmax(plane_aux_out, dim=1)
+                        teacher_probs_eff = _match_plane_channels_hungarian(
+                            student_probs=student_probs_for_match,
+                            teacher_probs=teacher_probs,
+                            valid_mask=valid_mask,
+                            plane_channels=max(teacher_probs.shape[1] - 1, 1),
+                        )
+
+                if _loss_type == 'plane_geo':
+                    # -------------------------------------------------------
+                    # Hungarian-matched BCE + Dice distillation.
+                    # Directly mirrors the criterion.py approach from the
+                    # ZeroPlane paper (SetCriterion.forward + loss_masks):
+                    #
+                    #   Step 1 — Hungarian matching (per image):
+                    #     Compute cost[i,j] = negative mask IoU between
+                    #     student slot i and teacher slot j (plane slots only).
+                    #     Run linear_sum_assignment → matched index pairs.
+                    #     This resolves slot permutation exactly as criterion.py
+                    #     does with self.matcher before calling loss_masks.
+                    #
+                    #   Step 2 — BCE + Dice on matched plane pairs:
+                    #     For each matched (student_i, teacher_j) pair:
+                    #       loss = sigmoid_BCE(logit_i, target_j)
+                    #            + Dice(sigmoid(logit_i), target_j)
+                    #     Mirrors loss_masks: sigmoid_ce_loss + dice_loss.
+                    #
+                    #   Step 3 — Nonplane channel unsupervised directly:
+                    #     Channel C-1 (nonplane) is globally consistent across
+                    #     images, so no matching needed — supervise directly.
+                    # -------------------------------------------------------
+                    from scipy.optimize import linear_sum_assignment as lsa
+
+                    valid_mask_2d = valid_mask[:, 0, :, :]   # (B,H,W) bool
+                    valid_mask_f  = valid_mask_2d.float()     # (B,H,W) float
+                    B             = plane_aux_out.shape[0]
+                    n_plane_slots = plane_aux_out.shape[1] - 1  # 20
+
+                    # Student sigmoid probabilities for plane slots: (B,20,H,W)
+                    student_probs_all = torch.sigmoid(plane_aux_out)
+
+                    batch_slot_losses = []
+                    for b_i in range(B):
+                        vm   = valid_mask_f[b_i]       # (H,W) float
+                        n_px = vm.sum().clamp(min=1.0)
+
+                        # ---- Build cost matrix (20 x 20) ----
+                        # cost[i,j] = negative soft IoU between student slot i
+                        # and teacher slot j, measured over valid pixels.
+                        # Using soft IoU (dot product / union) so gradients
+                        # flow through sigmoid, same spirit as criterion.py
+                        # which uses mask sigmoid probs for matching cost.
+                        with torch.no_grad():
+                            s_flat = (student_probs_all[b_i, :n_plane_slots, :, :] * vm
+                                      ).view(n_plane_slots, -1)         # (20, H*W)
+                            t_flat = (teacher_raw[b_i, :n_plane_slots, :, :] * vm
+                                      ).view(n_plane_slots, -1)         # (20, H*W)
+                            inter  = torch.mm(s_flat, t_flat.t())       # (20, 20)
+                            s_sum  = s_flat.sum(1, keepdim=True)        # (20,1)
+                            t_sum  = t_flat.sum(1, keepdim=True)        # (20,1)
+                            union  = s_sum + t_sum.t() - inter          # (20,20)
+                            iou    = inter / union.clamp(min=1e-6)      # (20,20)
+                            cost   = -iou.cpu().numpy()                 # minimise -IoU
+
+                        src_idx, tgt_idx = lsa(cost)  # Hungarian assignment
+
+                        # ---- BCE + Dice on matched plane slots ----
+                        matched_losses = []
+                        for s_k, t_k in zip(src_idx, tgt_idx):
+                            logit_k  = plane_aux_out[b_i, s_k, :, :]          # (H,W)
+                            target_k = teacher_raw[b_i, t_k, :, :] * vm       # (H,W)
+
+                            # sigmoid BCE (mirrors sigmoid_ce_loss)
+                            bce_k = F.binary_cross_entropy_with_logits(
+                                logit_k, target_k, reduction='none'
+                            )
+                            bce_k = (bce_k * vm).sum() / n_px
+
+                            # Dice (mirrors dice_loss)
+                            prob_k = torch.sigmoid(logit_k) * vm
+                            inter_k = (prob_k * target_k).sum()
+                            dice_k  = 1.0 - (2.0 * inter_k + 1.0) / (
+                                prob_k.sum() + target_k.sum() + 1.0)
+
+                            matched_losses.append(bce_k + dice_k)
+
+                        # ---- Nonplane channel: direct (no matching needed) ----
+                        logit_np  = plane_aux_out[b_i, -1, :, :]
+                        target_np = teacher_raw[b_i, -1, :, :] * vm
+                        bce_np    = F.binary_cross_entropy_with_logits(
+                            logit_np, target_np, reduction='none'
+                        )
+                        bce_np    = (bce_np * vm).sum() / n_px
+                        prob_np   = torch.sigmoid(logit_np) * vm
+                        inter_np  = (prob_np * target_np).sum()
+                        dice_np   = 1.0 - (2.0 * inter_np + 1.0) / (
+                            prob_np.sum() + target_np.sum() + 1.0)
+                        matched_losses.append(bce_np + dice_np)
+
+                        batch_slot_losses.append(
+                            torch.stack(matched_losses).mean()
+                        )
+
+                    plane_aux_loss = torch.stack(batch_slot_losses).mean()
+
+                elif _loss_type in ('mse', 'perm_mse'):
                     # MSE between student softmax and teacher probs.
                     # Gradient = 2*(Q-P) per element — does NOT collapse on
                     # near-uniform teachers, unlike KL div.
                     student_probs = F.softmax(plane_aux_out, dim=1)
-                    diff_sum = ((student_probs - teacher_probs) ** 2).sum(dim=1, keepdim=True)
+                    diff_sum = ((student_probs - teacher_probs_eff) ** 2).sum(dim=1, keepdim=True)
                     plane_aux_loss = diff_sum[valid_mask].mean()
-                elif _loss_type == 'ce_hard':
+                elif _loss_type in ('ce_hard', 'perm_ce_hard'):
                     # Hard cross-entropy: convert teacher to a single argmax label.
                     # Sharpest gradient signal; discards inter-channel soft info.
-                    hard_label = teacher_probs.argmax(dim=1).long()  # (B,H,W)
+                    hard_label = teacher_probs_eff.argmax(dim=1).long()  # (B,H,W)
                     # Mask out Cityscapes "don't care" pixels so they don't
                     # contribute to the plane loss either.
                     hard_label[lb == ignore_idx] = ignore_idx
@@ -948,11 +1134,11 @@ def train():
                         ignore_index=ignore_idx,
                         reduction='mean',
                     )
-                else:  # 'kl' — original behaviour
+                else:  # 'kl' / 'perm_kl'
                     student_log_probs = F.log_softmax(plane_aux_out, dim=1)
                     plane_aux_loss_map = F.kl_div(
                         student_log_probs,
-                        teacher_probs,
+                        teacher_probs_eff,
                         reduction='none',
                     ).sum(dim=1, keepdim=True)
                     plane_aux_loss = plane_aux_loss_map[valid_mask].mean()

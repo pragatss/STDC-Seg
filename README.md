@@ -273,6 +273,18 @@ maxmIOU50 is: 0.7082292437553406, maxmIOU75 is: 0.7413071990013123.
 mIOU50 is: 0.690978467464447, mIOU75 is: 0.7247892022132874
 maxmIOU50 is: 0.6967727541923523, maxmIOU75 is: 0.7294437289237976.
 
+## perm_kl
+max mIOU model saved to: checkpoints/train_STDC1-Seg/perm_kl/pths/model_maxmIOU50.pth
+mIOU50 is: 0.6472561359405518, mIOU75 is: 0.680532693862915
+maxmIOU50 is: 0.6472561359405518, maxmIOU75 is: 0.6811373829841614.
+
+## plane_geo
+max mIOU model saved to: checkpoints/train_STDC1-Seg/plane_geo_hungarian_delayed/pths/model_maxmIOU50.pth
+max mIOU model saved to: checkpoints/train_STDC1-Seg/plane_geo_hungarian_delayed/pths/model_maxmIOU75.pth
+mIOU50 is: 0.6510329842567444, mIOU75 is: 0.7019394636154175
+maxmIOU50 is: 0.6510329842567444, maxmIOU75 is: 0.7019394636154175.
+training done, model saved to: checkpoints/train_STDC1-Seg/plane_geo_hungarian_delayed/pths/model_final.pth
+epoch:  397
 
 
 ## Per class
@@ -314,7 +326,14 @@ python -m torch.distributed.launch --nproc_per_node=1 train.py \
   --plane_loss_weight .4 \
   --plane_aux_tap cp8 \
   --plane_aux_mid 256 \
-  --plane_aux_loss_type ce_hard
+  --plane_aux_loss_type perm_kl
+
+### Permutation-robust plane distillation
+
+Use `--plane_aux_loss_type perm_kl` (or `perm_mse`, `perm_ce_hard`) when
+teacher plane slots are not semantically ordered. These modes align teacher
+plane channels to student channels per image with Hungarian matching before
+computing the auxiliary loss.
 
 ### Note: plane_aux_loss plateau (~0.0024–0.0025)
 
