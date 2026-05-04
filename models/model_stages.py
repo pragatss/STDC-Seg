@@ -329,7 +329,9 @@ class ContextPath(nn.Module):
         
         # feat_cp16 (feat32_up) → auxiliary seg head for deep supervision (Paper §3.2)
         # feat_cp8  (feat16_up) → primary input to Feature Fusion Module (Paper §3.2)
-        return feat2, feat4, feat8, feat16, feat16_up, feat32_up # x8, x16
+        # feat32 (raw 1/32 backbone stage) is also returned for optional taps
+        # such as plane_aux_tap='res32'.
+        return feat2, feat4, feat8, feat16, feat16_up, feat32_up, feat32 # x8, x16, x32
 
     def init_weight(self):
         for ly in self.children():
@@ -516,6 +518,7 @@ class  BiSeNet(nn.Module):
                 'cp16': conv_out_inplanes,
                 'res8': sp8_inplanes,
                 'res16': sp16_inplanes,
+                'res32': 1024,
             }
             if self.plane_aux_tap not in plane_inplanes_map:
                 raise ValueError('Unsupported plane_aux_tap {}. Choose from {}'.format(
@@ -536,7 +539,7 @@ class  BiSeNet(nn.Module):
         H, W = x.size()[2:]
         
         # ContextPath returns STDC backbone stages (feat_res*) and refined context (feat_cp*)
-        feat_res2, feat_res4, feat_res8, feat_res16, feat_cp8, feat_cp16 = self.cp(x)
+        feat_res2, feat_res4, feat_res8, feat_res16, feat_cp8, feat_cp16, feat_res32 = self.cp(x)
 
         # --- Detail boundary predictions (Paper §3.3, Detail Aggregation Learning) ---
         # These are passed to DetailAggregateLoss during training only.
@@ -573,6 +576,8 @@ class  BiSeNet(nn.Module):
                 plane_feat = feat_cp16
             elif self.plane_aux_tap == 'res8':
                 plane_feat = feat_res8
+            elif self.plane_aux_tap == 'res32':
+                plane_feat = feat_res32
             else:
                 plane_feat = feat_res16
             if self.plane_aux_head._fwd_call_count < 2:

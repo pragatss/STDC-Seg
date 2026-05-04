@@ -944,8 +944,8 @@ def train():
         loss2 = criteria_16(out16, lb)   # auxiliary head at Context Path 1/8
         loss3 = criteria_32(out32, lb)   # auxiliary head at Context Path 1/16
         
-        boundery_bce_loss = 0.
-        boundery_dice_loss = 0.
+        boundery_bce_loss = torch.tensor(0.0, device=im.device)
+        boundery_dice_loss = torch.tensor(0.0, device=im.device)
         
         # ---------------------------------------------------------------
         # Boundary loss — "did we correctly find the edges between objects?"

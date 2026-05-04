@@ -363,3 +363,26 @@ cd /home/husky/Downloads/Pragat/STDC-Seg-Mod && python scripts/precompute_soft_t
   --opts MODEL.WEIGHTS ./checkpoints/dust3r_encoder_released.pth \
   --max_images 0 \
   --resume
+
+
+  ## run from stage 3 and do not use detail heads
+  python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC1-Seg/plane_stage3_no_detail \
+  --backbone STDCNet813 \
+  --mode train \
+  --n_workers_train 10 \
+  --n_workers_val 1 \
+  --n_img_per_gpu 12 \
+  --max_iter 60000 \
+  --pretrain_path checkpoints/STDCNet813M_73.91.tar \
+  --use_plane_aux True \
+  --soft_targets_dir soft_targets \
+  --plane_aux_tap res8 \
+  --plane_aux_mid 256 \
+  --plane_aux_loss_type plane_geo \
+  --plane_loss_weight 0.4 \
+  --plane_aux_start_iter 20000 \
+  --use_boundary_2 False \
+  --use_boundary_4 False \
+  --use_boundary_8 False \
+  --use_boundary_16 False
