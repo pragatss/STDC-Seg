@@ -4,8 +4,12 @@
 Offline pre-computation of ZeroPlane soft targets for Cityscapes training images.
 
 Run this ONCE before training. It iterates over every Cityscapes training image,
-feeds it through ZeroPlane at half resolution (512 × 1024) and saves the resulting
-21-channel sem_seg map downsampled to (128 × 256) as a float16 .npy file.
+feeds it through ZeroPlane at inference resolution and saves the resulting
+21-channel sem_seg map as a float16 .npy file.
+
+By default we now save the full inference-resolution tensor (512 × 1024)
+instead of downsampling before writing. This preserves plane-query boundaries
+better for training with cached soft targets.
 
 Total disk usage: ~4 GB for all 2975 Cityscapes training images.
 
@@ -20,7 +24,9 @@ Usage:
 The output mirrors the Cityscapes leftImg8bit directory layout:
     soft_targets/train/<city>/<name>.npy
 
-Each .npy file contains a float16 numpy array of shape (21, 128, 256).
+Each .npy file contains a float16 numpy array of shape (21, H, W), where
+H/W default to the ZeroPlane inference size (512, 1024). You may optionally
+request a smaller saved size with --save_h / --save_w.
 """
 
 import argparse
@@ -30,13 +36,6 @@ import sys
 import numpy as np
 from PIL import Image
 import torch
-
-# ---------------------------------------------------------------------------
-# Soft-target resolution.  1/8 of native Cityscapes (1024 × 2048) = (128, 256).
-# This is also 1/4 of the inference crop size (512 × 1024) used below.
-# ---------------------------------------------------------------------------
-ST_H = 128
-ST_W = 256
 
 # Resolution fed to ZeroPlane.  Using half native height/width keeps VRAM low
 # while preserving the 2:1 aspect ratio that per-pixel predictions need.
@@ -82,6 +81,10 @@ def parse_args():
                    help='Skip images whose .npy already exists')
     p.add_argument('--max_images', type=int, default=0,
                    help='Stop after this many images (0 = process all); use 1 for a quick test')
+    p.add_argument('--save_h', type=int, default=0,
+                   help='Optional height to save soft targets at. 0 = keep full inference resolution.')
+    p.add_argument('--save_w', type=int, default=0,
+                   help='Optional width to save soft targets at. 0 = keep full inference resolution.')
     return p.parse_args()
 
 
@@ -236,37 +239,38 @@ def main():
             nonplane_mask = (argmax == 20)  # True where non-plane dominates
             nonplane_frac = float(nonplane_mask.float().mean()) * 100.0
             print('[precompute] non-plane pixels (ch20 argmax): {:.1f}%'.format(nonplane_frac), flush=True)
+            print('[precompute] ch20 (non-plane) min={:.4f} max={:.4f} mean={:.4f}'.format(
+                float(sem_seg[20].min()), float(sem_seg[20].max()), float(sem_seg[20].mean())), flush=True)
 
-            # Zero out channel 20 and replace non-plane pixels with a uniform
-            # distribution across the 20 plane channels so they produce ~zero
-            # KL loss and don't pollute distillation.
-            sem_seg[20] = 0.0
-            uniform_val = 1.0 / 20.0
-            nonplane_mask_expanded = nonplane_mask.unsqueeze(0).expand_as(sem_seg)  # (21, H, W)
-            uniform = torch.full_like(sem_seg, uniform_val)
-            uniform[20] = 0.0  # keep non-plane channel at 0
-            sem_seg = torch.where(nonplane_mask_expanded, uniform, sem_seg)
-
-            # Re-normalise so each pixel's 20 plane channels sum to 1.
-            channel_sum = sem_seg.sum(dim=0, keepdim=True).clamp(min=1e-6)
-            sem_seg = sem_seg / channel_sum
+            # Keep all 21 channels as-is (proper softmax probabilities summing
+            # to 1 per pixel). Channel 20 = non-plane probability is preserved
+            # so that binary plane/non-plane distillation can use it directly:
+            #   plane_prob   = 1 - ch20  (or equivalently sum of ch 0-19)
+            #   nonplane_prob = ch20
+            # NOTE: do NOT zero ch20 or replace non-plane pixels with uniform,
+            # as that destroys the binary signal and causes the loss to collapse.
 
             print('[precompute] after masking min/max: {:.4f} / {:.4f}'.format(
                 float(sem_seg.min()), float(sem_seg.max())), flush=True)
 
-            # Downsample from (21, INFER_H, INFER_W) to (21, ST_H, ST_W).
-            sem_seg_small = torch.nn.functional.interpolate(
-                sem_seg.unsqueeze(0),
-                size=(ST_H, ST_W),
-                mode='bilinear',
-                align_corners=True,
-            ).squeeze(0)
+            if args.save_h > 0 or args.save_w > 0:
+                if args.save_h <= 0 or args.save_w <= 0:
+                    raise ValueError('--save_h and --save_w must both be > 0 when either is set')
+                sem_seg_to_save = torch.nn.functional.interpolate(
+                    sem_seg.unsqueeze(0),
+                    size=(args.save_h, args.save_w),
+                    mode='bilinear',
+                    align_corners=True,
+                ).squeeze(0)
+                print('[precompute] resized shape    : {}'.format(tuple(sem_seg_to_save.shape)), flush=True)
+            else:
+                sem_seg_to_save = sem_seg
+                print('[precompute] keeping full-res : {}'.format(tuple(sem_seg_to_save.shape)), flush=True)
 
-            print('[precompute] downsampled shape : {}'.format(tuple(sem_seg_small.shape)), flush=True)
             print('[precompute] saving to         : {}'.format(out_path), flush=True)
 
             # Save as float16 to halve storage (~1.4 MB per file, ~4 GB total).
-            np.save(out_path, sem_seg_small.numpy().astype(np.float16))
+            np.save(out_path, sem_seg_to_save.numpy().astype(np.float16))
 
             done += 1
             if done % 50 == 0:

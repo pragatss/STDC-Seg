@@ -528,7 +528,7 @@ class  BiSeNet(nn.Module):
             self.plane_aux_head = PlaneAuxHead(
                 plane_inplanes_map[self.plane_aux_tap],
                 mid_chan=plane_aux_mid,
-                n_classes=21,
+                n_classes=1,  # binary: plane vs non-plane
                 zeroplane_model=zeroplane_model,
                 zeroplane_soft_target_fn=zeroplane_soft_target_fn,
             )
