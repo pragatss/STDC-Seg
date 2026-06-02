@@ -1,0 +1,274 @@
+{
+  "stem": "cologne_000000_000019_leftImg8bit",
+  "assignment_mode": "majority",
+  "plane_threshold": 0.5,
+  "planes": [
+    {
+      "plane_idx": 0,
+      "pixel_count": 525,
+      "majority_class": 13,
+      "majority_name": "car",
+      "majority_fraction": 0.8103448275862069,
+      "render_color_rgb": [
+        0,
+        0,
+        128
+      ],
+      "class_hist": {
+        "building": 69,
+        "vegetation": 19,
+        "car": 376
+      }
+    },
+    {
+      "plane_idx": 1,
+      "pixel_count": 2545,
+      "majority_class": 2,
+      "majority_name": "building",
+      "majority_fraction": 0.789079700572435,
+      "render_color_rgb": [
+        0,
+        128,
+        0
+      ],
+      "class_hist": {
+        "building": 1792,
+        "pole": 26,
+        "traffic light": 1,
+        "traffic sign": 195,
+        "vegetation": 248,
+        "car": 9
+      }
+    },
+    {
+      "plane_idx": 2,
+      "pixel_count": 900,
+      "majority_class": 13,
+      "majority_name": "car",
+      "majority_fraction": 0.9722222222222222,
+      "render_color_rgb": [
+        0,
+        128,
+        128
+      ],
+      "class_hist": {
+        "building": 20,
+        "vegetation": 5,
+        "car": 875
+      }
+    },
+    {
+      "plane_idx": 3,
+      "pixel_count": 437,
+      "majority_class": 8,
+      "majority_name": "vegetation",
+      "majority_fraction": 0.875,
+      "render_color_rgb": [
+        128,
+        0,
+        0
+      ],
+      "class_hist": {
+        "sidewalk": 3,
+        "fence": 6,
+        "vegetation": 63
+      }
+    },
+    {
+      "plane_idx": 4,
+      "pixel_count": 11961,
+      "majority_class": 0,
+      "majority_name": "road",
+      "majority_fraction": 0.8575122091353059,
+      "render_color_rgb": [
+        128,
+        0,
+        128
+      ],
+      "class_hist": {
+        "road": 8955,
+        "sidewalk": 966,
+        "building": 16,
+        "pole": 8,
+        "vegetation": 5,
+        "person": 10,
+        "car": 483
+      }
+    },
+    {
+      "plane_idx": 5,
+      "pixel_count": 1313,
+      "majority_class": 2,
+      "majority_name": "building",
+      "majority_fraction": 0.7099903006789525,
+      "render_color_rgb": [
+        128,
+        128,
+        0
+      ],
+      "class_hist": {
+        "building": 732,
+        "pole": 79,
+        "traffic light": 12,
+        "vegetation": 177,
+        "sky": 1,
+        "person": 3,
+        "car": 27
+      }
+    },
+    {
+      "plane_idx": 6,
+      "pixel_count": 34,
+      "majority_class": 2,
+      "majority_name": "building",
+      "majority_fraction": 1.0,
+      "render_color_rgb": [
+        128,
+        128,
+        128
+      ],
+      "class_hist": {
+        "building": 21
+      }
+    },
+    {
+      "plane_idx": 7,
+      "pixel_count": 808,
+      "majority_class": 13,
+      "majority_name": "car",
+      "majority_fraction": 0.927916120576671,
+      "render_color_rgb": [
+        0,
+        0,
+        64
+      ],
+      "class_hist": {
+        "sidewalk": 11,
+        "building": 8,
+        "vegetation": 36,
+        "car": 708
+      }
+    },
+    {
+      "plane_idx": 8,
+      "pixel_count": 484,
+      "majority_class": 5,
+      "majority_name": "pole",
+      "majority_fraction": 0.5630252100840336,
+      "render_color_rgb": [
+        0,
+        0,
+        192
+      ],
+      "class_hist": {
+        "sidewalk": 142,
+        "building": 14,
+        "pole": 201
+      }
+    },
+    {
+      "plane_idx": 10,
+      "pixel_count": 2756,
+      "majority_class": 1,
+      "majority_name": "sidewalk",
+      "majority_fraction": 0.9597523219814241,
+      "render_color_rgb": [
+        0,
+        128,
+        192
+      ],
+      "class_hist": {
+        "sidewalk": 2480,
+        "pole": 99,
+        "car": 5
+      }
+    },
+    {
+      "plane_idx": 11,
+      "pixel_count": 488,
+      "majority_class": 13,
+      "majority_name": "car",
+      "majority_fraction": 0.6443514644351465,
+      "render_color_rgb": [
+        128,
+        0,
+        64
+      ],
+      "class_hist": {
+        "sidewalk": 9,
+        "building": 65,
+        "pole": 4,
+        "traffic light": 4,
+        "vegetation": 88,
+        "car": 308
+      }
+    },
+    {
+      "plane_idx": 12,
+      "pixel_count": 613,
+      "majority_class": 1,
+      "majority_name": "sidewalk",
+      "majority_fraction": 0.7137870855148342,
+      "render_color_rgb": [
+        128,
+        0,
+        192
+      ],
+      "class_hist": {
+        "road": 164,
+        "sidewalk": 409
+      }
+    },
+    {
+      "plane_idx": 13,
+      "pixel_count": 1700,
+      "majority_class": 8,
+      "majority_name": "vegetation",
+      "majority_fraction": 0.7992388201712655,
+      "render_color_rgb": [
+        128,
+        128,
+        64
+      ],
+      "class_hist": {
+        "building": 73,
+        "pole": 119,
+        "vegetation": 840,
+        "car": 19
+      }
+    },
+    {
+      "plane_idx": 14,
+      "pixel_count": 2800,
+      "majority_class": 2,
+      "majority_name": "building",
+      "majority_fraction": 0.7430083144368859,
+      "render_color_rgb": [
+        128,
+        128,
+        192
+      ],
+      "class_hist": {
+        "building": 1966,
+        "fence": 148,
+        "vegetation": 532
+      }
+    },
+    {
+      "plane_idx": 15,
+      "pixel_count": 628,
+      "majority_class": 13,
+      "majority_name": "car",
+      "majority_fraction": 0.9920382165605095,
+      "render_color_rgb": [
+        0,
+        64,
+        0
+      ],
+      "class_hist": {
+        "sidewalk": 5,
+        "car": 623
+      }
+    }
+  ]
+}
