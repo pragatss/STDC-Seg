@@ -22,6 +22,8 @@ from loss.loss import OhemCELoss              # Segmentation loss (OHEM cross-en
 from loss.detail_loss import DetailAggregateLoss  # Boundary loss (Paper §3.3)
 from evaluation import MscEvalV0              # mIOU evaluator
 from optimizer_loss import Optimizer          # SGD with warmup + poly LR decay (Paper §4)
+from ZeroPlane.ZeroPlane.modeling.matcher import HungarianMatcher
+from ZeroPlane.ZeroPlane.modeling.criterion import SetCriterion
 
 import torch
 import torch.nn as nn
@@ -138,6 +140,117 @@ def parse_args():
         default=64,
     )
     parse.add_argument(
+        '--plane_aux_mode',
+        dest='plane_aux_mode',
+        type=str,
+        default='dense',
+        choices=['dense', 'setcriterion'],
+        help=(
+            'Planar auxiliary head mode.\n'
+            '  dense        : legacy per-pixel planar logits.\n'
+            '  setcriterion : query-based planar outputs '
+            '(pred_logits/pred_masks) for SetCriterion integration.'
+        ),
+    )
+    parse.add_argument(
+        '--plane_aux_num_queries',
+        dest='plane_aux_num_queries',
+        type=int,
+        default=21,
+        help='Number of planar queries when --plane_aux_mode=setcriterion.',
+    )
+    parse.add_argument(
+        '--plane_aux_num_classes',
+        dest='plane_aux_num_classes',
+        type=int,
+        default=20,
+        help='Number of foreground planar classes C for SetCriterion (head outputs C+1).',
+    )
+    parse.add_argument(
+        '--plane_aux_hidden_dim',
+        dest='plane_aux_hidden_dim',
+        type=int,
+        default=256,
+        help='Transformer hidden dimension for setcriterion planar head.',
+    )
+    parse.add_argument(
+        '--plane_aux_decoder_layers',
+        dest='plane_aux_decoder_layers',
+        type=int,
+        default=3,
+        help='Number of transformer decoder layers for setcriterion planar head.',
+    )
+    parse.add_argument(
+        '--plane_set_cost_class',
+        dest='plane_set_cost_class',
+        type=float,
+        default=1.0,
+        help='Hungarian matcher class cost for planar SetCriterion mode.',
+    )
+    parse.add_argument(
+        '--plane_set_cost_mask',
+        dest='plane_set_cost_mask',
+        type=float,
+        default=1.0,
+        help='Hungarian matcher mask BCE cost for planar SetCriterion mode.',
+    )
+    parse.add_argument(
+        '--plane_set_cost_dice',
+        dest='plane_set_cost_dice',
+        type=float,
+        default=1.0,
+        help='Hungarian matcher dice cost for planar SetCriterion mode.',
+    )
+    parse.add_argument(
+        '--plane_set_num_points',
+        dest='plane_set_num_points',
+        type=int,
+        default=12544,
+        help='Point sampling count for SetCriterion/matcher mask losses.',
+    )
+    parse.add_argument(
+        '--plane_set_oversample_ratio',
+        dest='plane_set_oversample_ratio',
+        type=float,
+        default=3.0,
+        help='SetCriterion oversample ratio for uncertain point sampling.',
+    )
+    parse.add_argument(
+        '--plane_set_importance_sample_ratio',
+        dest='plane_set_importance_sample_ratio',
+        type=float,
+        default=0.75,
+        help='SetCriterion importance sample ratio for uncertain point sampling.',
+    )
+    parse.add_argument(
+        '--plane_set_eos_coef',
+        dest='plane_set_eos_coef',
+        type=float,
+        default=0.1,
+        help='No-object (EOS) class weight in SetCriterion classification loss.',
+    )
+    parse.add_argument(
+        '--plane_set_weight_ce',
+        dest='plane_set_weight_ce',
+        type=float,
+        default=1.0,
+        help='Weight for SetCriterion classification loss (loss_ce).',
+    )
+    parse.add_argument(
+        '--plane_set_weight_mask',
+        dest='plane_set_weight_mask',
+        type=float,
+        default=5.0,
+        help='Weight for SetCriterion mask BCE loss (loss_mask).',
+    )
+    parse.add_argument(
+        '--plane_set_weight_dice',
+        dest='plane_set_weight_dice',
+        type=float,
+        default=5.0,
+        help='Weight for SetCriterion dice loss (loss_dice).',
+    )
+    parse.add_argument(
         '--plane_aux_loss_type',
         dest='plane_aux_loss_type',
         type=str,
@@ -189,7 +302,7 @@ def parse_args():
             '--max_iter',
             dest = 'max_iter',
             type = int,
-            default = 40000,
+            default = 60000,
             )
     parse.add_argument(
             '--save_iter_sep',
@@ -498,6 +611,63 @@ def _match_plane_channels_hungarian(student_probs, teacher_probs, valid_mask, pl
     return aligned
 
 
+def _build_setcriterion_plane_targets(teacher_soft_target, valid_mask, plane_channels=20):
+        """
+        Convert dense 21-channel ZeroPlane soft target maps into DETR-style instance
+        targets expected by SetCriterion.
+
+        Input:
+            teacher_soft_target: (B, C, H, W), where C typically = 21
+                channels 0..(plane_channels-1) are plane slots and channel 20 is non-plane.
+            valid_mask: (B, 1, H, W) bool, True on valid (non-ignore) pixels.
+
+        Output:
+            targets: list[dict], length B, each dict has:
+                - labels: (N_i,) long
+                - masks : (N_i, H, W) float
+
+        Construction rule:
+            - Compute per-pixel argmax over channels.
+            - For each plane slot class c in [0, plane_channels), create one instance
+                mask from pixels where argmax == c and valid_mask is True.
+            - Keep only non-empty masks.
+        """
+        if teacher_soft_target.ndim != 4:
+                raise ValueError('teacher_soft_target must be 4D (B,C,H,W), got {}'.format(tuple(teacher_soft_target.shape)))
+        if valid_mask.ndim != 4:
+                raise ValueError('valid_mask must be 4D (B,1,H,W), got {}'.format(tuple(valid_mask.shape)))
+
+        bsz, _, h, w = teacher_soft_target.shape
+        argmax_map = teacher_soft_target.argmax(dim=1)  # (B,H,W)
+        targets = []
+
+        for b in range(bsz):
+                vm = valid_mask[b, 0].bool()  # (H,W)
+                labels = []
+                masks = []
+
+                for cls_id in range(plane_channels):
+                        inst_mask = (argmax_map[b] == cls_id) & vm
+                        if torch.count_nonzero(inst_mask) == 0:
+                                continue
+                        labels.append(cls_id)
+                        masks.append(inst_mask.float())
+
+                if labels:
+                        labels_t = torch.tensor(labels, dtype=torch.long, device=teacher_soft_target.device)
+                        masks_t = torch.stack(masks, dim=0).to(dtype=teacher_soft_target.dtype)
+                else:
+                        labels_t = torch.empty((0,), dtype=torch.long, device=teacher_soft_target.device)
+                        masks_t = torch.empty((0, h, w), dtype=teacher_soft_target.dtype, device=teacher_soft_target.device)
+
+                targets.append({
+                        'labels': labels_t,
+                        'masks': masks_t,
+                })
+
+        return targets
+
+
 def build_zeroplane_soft_target_fn(config_path, config_opts=None, ckpt_path=''):
     print('[build_zeroplane_soft_target_fn] config_path={} ckpt_path={}'.format(config_path, ckpt_path), flush=True)
     if not ckpt_path:
@@ -585,6 +755,15 @@ def _collate_st_aware(batch):
 def train():
     print('[TRAIN] train() start', flush=True)
     args = parse_args()
+    # Torchrun commonly provides rank information via environment variables
+    # (LOCAL_RANK/RANK/WORLD_SIZE) rather than explicit CLI flags. Resolve
+    # those here so CUDA device and DDP setup never receive a negative index.
+    if args.local_rank < 0:
+        env_local_rank = os.environ.get('LOCAL_RANK', None)
+        if env_local_rank is not None:
+            args.local_rank = int(env_local_rank)
+        else:
+            args.local_rank = 0
     print('[TRAIN] args parsed, local_rank={}'.format(args.local_rank), flush=True)
     
     save_pth_path = os.path.join(args.respath, 'pths')
@@ -598,14 +777,15 @@ def train():
     
     print('[TRAIN] cuda.set_device({})'.format(args.local_rank), flush=True)
     torch.cuda.set_device(args.local_rank)
-    world_size = torch.cuda.device_count()
+    world_size = int(os.environ.get('WORLD_SIZE', torch.cuda.device_count()))
     backend = 'gloo' if world_size <= 1 else 'nccl'
+    rank = int(os.environ.get('RANK', args.local_rank))
     print('[TRAIN] dist.init_process_group start (backend={}, world_size={})'.format(backend, world_size), flush=True)
     dist.init_process_group(
                 backend = backend,
                 init_method = 'env://',
                 world_size = world_size,
-                rank=args.local_rank
+                rank=rank
                 )
     print('[TRAIN] dist.init_process_group done', flush=True)
     
@@ -653,6 +833,7 @@ def train():
         logger.info('demo config_file: {}'.format(args.config_file))
         logger.info('demo opts: {}'.format(args.opts if args.opts else 'None'))
         logger.info('soft_targets_dir: {}'.format(args.soft_targets_dir))
+        logger.info('plane_aux_mode: {}'.format(args.plane_aux_mode))
 
 
     print('[TRAIN] building CityScapes dataset (train)...', flush=True)
@@ -734,7 +915,12 @@ def train():
     use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
     use_plane_aux=use_plane_aux, plane_aux_tap=args.plane_aux_tap, plane_aux_mid=args.plane_aux_mid,
     zeroplane_model=zeroplane_model, zeroplane_soft_target_fn=zeroplane_soft_target_fn,
-    plane_aux_soft_target_only_debug=args.plane_aux_soft_target_only_debug)
+    plane_aux_soft_target_only_debug=args.plane_aux_soft_target_only_debug,
+    plane_aux_mode=args.plane_aux_mode,
+    plane_aux_num_queries=args.plane_aux_num_queries,
+    plane_aux_num_classes=args.plane_aux_num_classes,
+    plane_aux_hidden_dim=args.plane_aux_hidden_dim,
+    plane_aux_decoder_layers=args.plane_aux_decoder_layers)
 
     print('[TRAIN] BiSeNet built', flush=True)
     if not args.ckpt is None:
@@ -786,6 +972,62 @@ def train():
     #          number of edge pixels vs. the large number of non-edge pixels.
     # ---------------------------------------------------------------
     boundary_loss_func = DetailAggregateLoss()
+
+    # ---------------------------------------------------------------
+    # Planar SetCriterion (Phase-2)
+    #
+    # When plane_aux_mode=setcriterion, the planar head returns:
+    #   - pred_logits: (B,Q,C+1)
+    #   - pred_masks : (B,Q,H,W)
+    #
+    # Here we build HungarianMatcher + SetCriterion using the same contracts
+    # as ZeroPlane, but only the labels+masks losses for the planar branch.
+    # ---------------------------------------------------------------
+    plane_set_criterion = None
+    if use_plane_aux and args.plane_aux_mode == 'setcriterion':
+        if dist.get_rank() == 0:
+            logger.info('Initializing planar SetCriterion (labels+masks only)')
+
+        plane_matcher = HungarianMatcher(
+            cost_class=args.plane_set_cost_class,
+            cost_mask=args.plane_set_cost_mask,
+            cost_dice=args.plane_set_cost_dice,
+            cost_param=0.0,
+            cost_depth=0.0,
+            cost_pixel_normal=0.0,
+            predict_param=False,
+            predict_depth=False,
+            predict_pixel_normal=False,
+            num_points=args.plane_set_num_points,
+            normalize_param=False,
+        )
+
+        plane_weight_dict = {
+            'loss_ce': args.plane_set_weight_ce,
+            'loss_mask': args.plane_set_weight_mask,
+            'loss_dice': args.plane_set_weight_dice,
+        }
+
+        plane_set_criterion = SetCriterion(
+            num_classes=args.plane_aux_num_classes,
+            matcher=plane_matcher,
+            weight_dict=plane_weight_dict,
+            eos_coef=args.plane_set_eos_coef,
+            losses=['labels', 'masks'],
+            num_points=args.plane_set_num_points,
+            oversample_ratio=args.plane_set_oversample_ratio,
+            importance_sample_ratio=args.plane_set_importance_sample_ratio,
+            normalize_param=False,
+            pixel_depth_loss_type='l1',
+            upsample_pixel_pred=False,
+        ).cuda()
+
+        if dist.get_rank() == 0:
+            logger.info('Planar SetCriterion ready: queries={}, classes={}, points={}'.format(
+                args.plane_aux_num_queries,
+                args.plane_aux_num_classes,
+                args.plane_set_num_points,
+            ))
     # ---------------------------------------------------------------
     # Optimiser: SGD with Warmup + Polynomial LR Decay (Paper §4)
     #
@@ -886,6 +1128,7 @@ def train():
         # ---------------------------------------------------------------
         net_out = net(im)
         plane_aux_out = None
+        plane_aux_out_log = None
         plane_aux_soft_target = None
         if it == 0:
             print('[PLANE_AUX] it=0 net_out type={}, len={}'.format(
@@ -920,6 +1163,10 @@ def train():
                 out, out16, out32, plane_aux_out, plane_aux_soft_target = net_out
             else:
                 out, out16, out32 = net_out
+
+        # Keep an immutable reference for logging, because the training path may
+        # overwrite plane_aux_out (e.g., setcriterion branch disables dense-loss path).
+        plane_aux_out_log = plane_aux_out
 
         # Override model-generated soft target with the pre-computed cached one.
         # The model returns plane_aux_soft_target=None when no live teacher is
@@ -976,10 +1223,106 @@ def train():
         # output (20 plane slots + 1 non-plane slot) into the STDC aux head.
         plane_aux_loss = torch.tensor(0.0, device=im.device)
         if it == 0 and use_plane_aux:
+            if isinstance(plane_aux_out, dict):
+                _out_dbg = {k: (tuple(v.shape) if v is not None else None) for k, v in plane_aux_out.items()}
+            else:
+                _out_dbg = tuple(plane_aux_out.shape) if plane_aux_out is not None else None
             print('[PLANE_AUX] it=0 plane_aux_out={}, plane_aux_soft_target={}'.format(
-                tuple(plane_aux_out.shape) if plane_aux_out is not None else None,
+                _out_dbg,
                 tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None), flush=True)
             print('[PLANE_AUX] plane_aux_loss_enabled={}'.format(plane_aux_loss_enabled), flush=True)
+
+        if isinstance(plane_aux_out, dict):
+            # Phase-2 SetCriterion path:
+            # compute planar losses from query outputs (pred_logits/pred_masks)
+            # against pseudo instance targets derived from 21-channel soft maps.
+            if plane_aux_loss_enabled and it >= args.plane_aux_start_iter and plane_aux_soft_target is not None and plane_set_criterion is not None:
+                plane_aux_soft_target = plane_aux_soft_target.detach()
+                set_pred_masks = plane_aux_out.get('pred_masks', None)
+                set_pred_logits = plane_aux_out.get('pred_logits', None)
+
+                if set_pred_masks is None or set_pred_logits is None:
+                    if it == 0:
+                        print('[PLANE_AUX] WARNING: setcriterion mode missing pred_masks/pred_logits keys', flush=True)
+                else:
+                    if plane_aux_soft_target.shape[-2:] != set_pred_masks.shape[-2:]:
+                        plane_aux_soft_target = F.interpolate(
+                            plane_aux_soft_target,
+                            size=set_pred_masks.shape[-2:],
+                            mode='bilinear',
+                            align_corners=True,
+                        )
+
+                    # Build valid-mask in planar target resolution.
+                    valid_mask = (lb != ignore_idx).unsqueeze(1).float()
+                    if valid_mask.shape[-2:] != set_pred_masks.shape[-2:]:
+                        valid_mask = F.interpolate(valid_mask, size=set_pred_masks.shape[-2:], mode='nearest')
+                    valid_mask = valid_mask > 0.5
+
+                    teacher_raw = torch.clamp(plane_aux_soft_target, 0.0, 1.0)
+                    plane_targets = _build_setcriterion_plane_targets(
+                        teacher_soft_target=teacher_raw,
+                        valid_mask=valid_mask,
+                        plane_channels=min(args.plane_aux_num_classes, max(teacher_raw.shape[1] - 1, 1)),
+                    )
+
+                    # Numerical stability guard:
+                    # Hungarian matching in scipy fails if the cost matrix has
+                    # NaN/Inf entries. We sanitize query logits/masks before the
+                    # criterion call and keep training alive even if one batch
+                    # still triggers a matcher numeric error.
+                    set_outputs = {
+                        'pred_logits': torch.nan_to_num(
+                            plane_aux_out['pred_logits'], nan=0.0, posinf=20.0, neginf=-20.0
+                        ).clamp(min=-20.0, max=20.0),
+                        'pred_masks': torch.nan_to_num(
+                            plane_aux_out['pred_masks'], nan=0.0, posinf=20.0, neginf=-20.0
+                        ).clamp(min=-20.0, max=20.0),
+                    }
+
+                    if 'aux_outputs' in plane_aux_out:
+                        clean_aux = []
+                        for aux in plane_aux_out['aux_outputs']:
+                            clean_aux.append({
+                                'pred_logits': torch.nan_to_num(
+                                    aux['pred_logits'], nan=0.0, posinf=20.0, neginf=-20.0
+                                ).clamp(min=-20.0, max=20.0),
+                                'pred_masks': torch.nan_to_num(
+                                    aux['pred_masks'], nan=0.0, posinf=20.0, neginf=-20.0
+                                ).clamp(min=-20.0, max=20.0),
+                            })
+                        set_outputs['aux_outputs'] = clean_aux
+
+                    try:
+                        set_losses = plane_set_criterion(
+                            outputs=set_outputs,
+                            targets=plane_targets,
+                            anchors=None,
+                            focal_factors=None,
+                        )
+                    except ValueError as exc:
+                        if 'invalid numeric entries' in str(exc):
+                            if dist.get_rank() == 0:
+                                logger.warning('SetCriterion matcher numeric issue at it {}: {}. Skipping planar loss for this batch.'.format(
+                                    it + 1, exc
+                                ))
+                            set_losses = {}
+                        else:
+                            raise
+
+                    plane_aux_loss = torch.tensor(0.0, device=im.device)
+                    for k, v in set_losses.items():
+                        if k in plane_set_criterion.weight_dict:
+                            plane_aux_loss = plane_aux_loss + plane_set_criterion.weight_dict[k] * v
+
+                    if it == 0:
+                        _n_inst = [int(t['labels'].numel()) for t in plane_targets]
+                        print('[PLANE_AUX] setcriterion active: instances_per_image={} loss_keys={}'.format(
+                              _n_inst, sorted(list(set_losses.keys()))), flush=True)
+
+            # Prevent dense loss branch from running for dict outputs.
+            plane_aux_out = None
+
         if plane_aux_loss_enabled and it >= args.plane_aux_start_iter and plane_aux_out is not None and plane_aux_soft_target is not None:
             plane_aux_soft_target = plane_aux_soft_target.detach()
             if plane_aux_soft_target.shape[-2:] != plane_aux_out.shape[-2:]:
@@ -1188,7 +1531,10 @@ def train():
             loss_boundery_dice_avg = sum(loss_boundery_dice) / len(loss_boundery_dice)
             if use_plane_aux:
                 _teacher_fired = plane_aux_soft_target is not None
-                _aux_shape = tuple(plane_aux_out.shape) if plane_aux_out is not None else None
+                if isinstance(plane_aux_out_log, dict):
+                    _aux_shape = {k: (tuple(v.shape) if v is not None else None) for k, v in plane_aux_out_log.items()}
+                else:
+                    _aux_shape = tuple(plane_aux_out_log.shape) if plane_aux_out_log is not None else None
                 _tgt_shape = tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None
                 print('[PLANE_AUX] it={} teacher_fired={} aux_out={} soft_target={} loss_enabled={}'.format(
                     it+1, _teacher_fired, _aux_shape, _tgt_shape, plane_aux_loss_enabled), flush=True)

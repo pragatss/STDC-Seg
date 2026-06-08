@@ -243,6 +243,220 @@ class PlaneAuxHead(nn.Module):
     def get_params(self):
         return self.pred_head.get_params()
 
+
+class PlaneAuxSetCriterionHead(nn.Module):
+    """
+    Query-based planar auxiliary head compatible with DETR/Mask2Former-style
+    SetCriterion contracts.
+
+    Output contract:
+      - pred_logits: (B, Q, C+1)
+      - pred_masks : (B, Q, H, W)
+
+    where:
+      B = batch size
+      Q = number of queries
+      C = number of foreground plane classes
+
+    Notes:
+      - This module adapts only the planar branch; the main STDC segmentation
+        heads remain unchanged.
+      - We keep soft-target prediction wiring so existing teacher/cached-target
+        plumbing can still be reused while training code is migrated.
+    """
+    def __init__(
+        self,
+        in_chan,
+        hidden_dim=256,
+        num_queries=21,
+        num_classes=20,
+        nheads=8,
+        num_decoder_layers=3,
+        zeroplane_model=None,
+        zeroplane_soft_target_fn=None,
+        *args,
+        **kwargs
+    ):
+        super(PlaneAuxSetCriterionHead, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_queries = num_queries
+        self.num_classes = num_classes
+        self.zeroplane_model = zeroplane_model
+        self.zeroplane_soft_target_fn = zeroplane_soft_target_fn
+        self._fwd_call_count = 0
+
+        # Project STDC feature map channels into transformer hidden dimension.
+        self.input_proj = nn.Conv2d(in_chan, hidden_dim, kernel_size=1, bias=False)
+
+        # Learnable query embeddings (the "slots" matched by Hungarian assignment).
+        self.query_embed = nn.Embedding(num_queries, hidden_dim)
+
+        # Transformer decoder that lets queries attend to STDC feature tokens.
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=hidden_dim,
+            nhead=nheads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=0.0,
+            activation='relu',
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
+
+        # Classification head: each query predicts one of C foreground classes
+        # plus a no-object class (handled as C+1 by SetCriterion).
+        self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
+
+        # Mask embedding head: converts each query vector into mask coefficients.
+        self.mask_embed = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        self.init_weight()
+
+        print('[PlaneAuxSetCriterionHead.__init__] in_chan={}, hidden_dim={}, '
+              'num_queries={}, num_classes={}, zeroplane_model={}, '
+              'zeroplane_soft_target_fn={}'.format(
+              in_chan, hidden_dim, num_queries, num_classes,
+              type(zeroplane_model).__name__ if zeroplane_model is not None else None,
+              type(zeroplane_soft_target_fn).__name__ if zeroplane_soft_target_fn is not None else None),
+              flush=True)
+
+        if isinstance(self.zeroplane_model, nn.Module):
+            self.zeroplane_model.eval()
+            print('[PlaneAuxSetCriterionHead.__init__] zeroplane_model set to eval()', flush=True)
+
+    def init_weight(self):
+        for ly in self.children():
+            if isinstance(ly, nn.Conv2d):
+                nn.init.kaiming_normal_(ly.weight, a=1)
+                if ly.bias is not None:
+                    nn.init.constant_(ly.bias, 0)
+
+    def _predict_zeroplane_soft_target(self, image=None, zeroplane_inputs=None, pred_logits=None):
+        _verbose = (self._fwd_call_count <= 1)
+        if self.zeroplane_soft_target_fn is not None:
+            if _verbose:
+                print('[PlaneAuxSetCriterionHead._predict] calling zeroplane_soft_target_fn '
+                      '(image shape={})'.format(
+                      tuple(image.shape) if torch.is_tensor(image) else None), flush=True)
+            soft_target = self.zeroplane_soft_target_fn(
+                image=image,
+                zeroplane_inputs=zeroplane_inputs,
+                pred_logits=pred_logits,
+            )
+            if soft_target is None:
+                if _verbose:
+                    print('[PlaneAuxSetCriterionHead._predict] zeroplane_soft_target_fn returned None', flush=True)
+                return None
+            if torch.is_tensor(soft_target):
+                if soft_target.ndim == 2:
+                    soft_target = soft_target.unsqueeze(0).unsqueeze(0)
+                elif soft_target.ndim == 3:
+                    soft_target = soft_target.unsqueeze(0)
+                soft_target = torch.clamp(soft_target.float(), 0.0, 1.0)
+                if _verbose:
+                    print('[PlaneAuxSetCriterionHead._predict] soft_target shape={} min={:.4f} max={:.4f}'.format(
+                          tuple(soft_target.shape), soft_target.min().item(), soft_target.max().item()),
+                          flush=True)
+                return soft_target
+            if _verbose:
+                print('[PlaneAuxSetCriterionHead._predict] soft_target_fn returned non-tensor: {}'.format(type(soft_target)), flush=True)
+            return None
+
+        if self.zeroplane_model is None:
+            if _verbose:
+                print('[PlaneAuxSetCriterionHead._predict] no soft_target_fn and no zeroplane_model — returning None', flush=True)
+            return None
+
+        model_inputs = zeroplane_inputs
+        if model_inputs is None and torch.is_tensor(image):
+            model_inputs = [{"image": img} for img in image]
+
+        if model_inputs is None:
+            if _verbose:
+                print('[PlaneAuxSetCriterionHead._predict] model_inputs is None — returning None', flush=True)
+            return None
+
+        if _verbose:
+            print('[PlaneAuxSetCriterionHead._predict] calling zeroplane_model with {} inputs'.format(len(model_inputs)), flush=True)
+        outputs = self.zeroplane_model(model_inputs)
+        if torch.is_tensor(outputs):
+            plane = outputs.float()
+            if plane.ndim == 2:
+                plane = plane.unsqueeze(0).unsqueeze(0)
+            elif plane.ndim == 3:
+                plane = plane.unsqueeze(0)
+            plane = torch.clamp(plane, 0.0, 1.0)
+            if _verbose:
+                print('[PlaneAuxSetCriterionHead._predict] zeroplane_model output shape={}'.format(tuple(plane.shape)), flush=True)
+            return plane
+        if _verbose:
+            print('[PlaneAuxSetCriterionHead._predict] zeroplane_model returned non-tensor: {}'.format(type(outputs)), flush=True)
+        return None
+
+    def forward(self, feat, image=None, zeroplane_inputs=None):
+        self._fwd_call_count += 1
+        _verbose = (self._fwd_call_count <= 2)
+        if _verbose:
+            print('[PlaneAuxSetCriterionHead.forward] call #{} feat.shape={}'.format(
+                  self._fwd_call_count, tuple(feat.shape)), flush=True)
+
+        # Convert (B,C,H,W) STDC features into transformer memory tokens.
+        mask_features = self.input_proj(feat)  # (B,D,H,W)
+        B, D, H, W = mask_features.shape
+        memory = mask_features.flatten(2).permute(2, 0, 1)  # (HW,B,D)
+
+        # Query embeddings become decoder target sequence.
+        queries = self.query_embed.weight.unsqueeze(1).repeat(1, B, 1)  # (Q,B,D)
+        hs = self.decoder(tgt=queries, memory=memory)  # (Q,B,D)
+        hs = hs.permute(1, 0, 2)  # (B,Q,D)
+
+        # SetCriterion-compatible outputs.
+        pred_logits = self.class_embed(hs)  # (B,Q,C+1)
+        mask_coeff = self.mask_embed(hs)    # (B,Q,D)
+        pred_masks = torch.einsum('bqd,bdhw->bqhw', mask_coeff, mask_features)  # (B,Q,H,W)
+
+        if _verbose:
+            print('[PlaneAuxSetCriterionHead.forward] pred_logits.shape={} pred_masks.shape={}'.format(
+                  tuple(pred_logits.shape), tuple(pred_masks.shape)), flush=True)
+
+        soft_target = None
+        with torch.no_grad():
+            soft_target = self._predict_zeroplane_soft_target(
+                image=image,
+                zeroplane_inputs=zeroplane_inputs,
+                pred_logits=pred_logits,
+            )
+
+            if soft_target is not None:
+                soft_target = soft_target.to(pred_masks.device, dtype=pred_masks.dtype)
+                if soft_target.shape[-2:] != pred_masks.shape[-2:]:
+                    soft_target = F.interpolate(
+                        soft_target,
+                        size=pred_masks.shape[-2:],
+                        mode='bilinear',
+                        align_corners=True,
+                    )
+                soft_target = torch.clamp(soft_target, 0.0, 1.0)
+
+        out_dict = {
+            'pred_logits': pred_logits,
+            'pred_masks': pred_masks,
+        }
+        return out_dict, soft_target
+
+    def get_params(self):
+        wd_params, nowd_params = [], []
+        for name, module in self.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                wd_params.append(module.weight)
+                if module.bias is not None:
+                    nowd_params.append(module.bias)
+            elif isinstance(module, (BatchNorm2d, nn.LayerNorm, nn.BatchNorm2d)):
+                nowd_params += list(module.parameters())
+        return wd_params, nowd_params
+
 class ContextPath(nn.Module):
     """
     Context Path — Paper §3.2 / Fig. 4.
@@ -456,7 +670,7 @@ class  BiSeNet(nn.Module):
                                   At inference these are simply not called, so
                                   there is ZERO extra runtime cost (Paper §3.3).
     """
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_plane_aux=False, plane_aux_tap='fuse', plane_aux_mid=64, zeroplane_model=None, zeroplane_soft_target_fn=None, plane_aux_soft_target_only_debug=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_plane_aux=False, plane_aux_tap='fuse', plane_aux_mid=64, zeroplane_model=None, zeroplane_soft_target_fn=None, plane_aux_soft_target_only_debug=False, plane_aux_mode='dense', plane_aux_num_queries=21, plane_aux_num_classes=20, plane_aux_hidden_dim=256, plane_aux_decoder_layers=3, *args, **kwargs):
         super(BiSeNet, self).__init__()
         
         self.use_boundary_2 = use_boundary_2
@@ -466,6 +680,7 @@ class  BiSeNet(nn.Module):
         self.use_plane_aux = use_plane_aux
         self.plane_aux_tap = plane_aux_tap
         self.plane_aux_soft_target_only_debug = plane_aux_soft_target_only_debug
+        self.plane_aux_mode = plane_aux_mode
         # self.heat_map = heat_map
         self.cp = ContextPath(backbone, pretrain_model, use_conv_last=use_conv_last)
             
@@ -525,13 +740,26 @@ class  BiSeNet(nn.Module):
                     self.plane_aux_tap, list(plane_inplanes_map.keys())
                 ))
 
-            self.plane_aux_head = PlaneAuxHead(
-                plane_inplanes_map[self.plane_aux_tap],
-                mid_chan=plane_aux_mid,
-                n_classes=1,  # binary: plane vs non-plane
-                zeroplane_model=zeroplane_model,
-                zeroplane_soft_target_fn=zeroplane_soft_target_fn,
-            )
+            if self.plane_aux_mode == 'setcriterion':
+                # Query-based planar head for SetCriterion integration.
+                self.plane_aux_head = PlaneAuxSetCriterionHead(
+                    plane_inplanes_map[self.plane_aux_tap],
+                    hidden_dim=plane_aux_hidden_dim,
+                    num_queries=plane_aux_num_queries,
+                    num_classes=plane_aux_num_classes,
+                    num_decoder_layers=plane_aux_decoder_layers,
+                    zeroplane_model=zeroplane_model,
+                    zeroplane_soft_target_fn=zeroplane_soft_target_fn,
+                )
+            else:
+                # Existing dense planar head (backward-compatible default).
+                self.plane_aux_head = PlaneAuxHead(
+                    plane_inplanes_map[self.plane_aux_tap],
+                    mid_chan=plane_aux_mid,
+                    n_classes=1,  # binary: plane vs non-plane
+                    zeroplane_model=zeroplane_model,
+                    zeroplane_soft_target_fn=zeroplane_soft_target_fn,
+                )
 
         self.init_weight()
 
@@ -590,14 +818,29 @@ class  BiSeNet(nn.Module):
                 zeroplane_inputs=zeroplane_inputs,
             )
             if self.plane_aux_head._fwd_call_count <= 2:
+                if isinstance(plane_aux_logits, dict):
+                    _logits_dbg = {k: (tuple(v.shape) if v is not None else None) for k, v in plane_aux_logits.items()}
+                else:
+                    _logits_dbg = tuple(plane_aux_logits.shape) if plane_aux_logits is not None else None
                 print('[BiSeNet.forward] after plane_aux_head: logits={}, soft_target={}'.format(
-                      tuple(plane_aux_logits.shape) if plane_aux_logits is not None else None,
+                      _logits_dbg,
                       tuple(plane_aux_soft_target.shape) if plane_aux_soft_target is not None else None),
                       flush=True)
             if self.plane_aux_soft_target_only_debug:
                 plane_aux_logits = None
             else:
-                plane_aux_logits = F.interpolate(plane_aux_logits, (H, W), mode='bilinear', align_corners=True)
+                if isinstance(plane_aux_logits, dict):
+                    # SetCriterion mode: only upsample mask logits to full image;
+                    # class logits are query-level and remain (B,Q,C+1).
+                    if 'pred_masks' in plane_aux_logits and plane_aux_logits['pred_masks'] is not None:
+                        plane_aux_logits['pred_masks'] = F.interpolate(
+                            plane_aux_logits['pred_masks'],
+                            (H, W),
+                            mode='bilinear',
+                            align_corners=True,
+                        )
+                else:
+                    plane_aux_logits = F.interpolate(plane_aux_logits, (H, W), mode='bilinear', align_corners=True)
             if plane_aux_soft_target is not None and plane_aux_soft_target.shape[-2:] != (H, W):
                 plane_aux_soft_target = F.interpolate(
                     plane_aux_soft_target,
@@ -657,7 +900,7 @@ class  BiSeNet(nn.Module):
         wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params = [], [], [], []
         for name, child in self.named_children():
             child_wd_params, child_nowd_params = child.get_params()
-            if isinstance(child, (FeatureFusionModule, BiSeNetOutput, PlaneAuxHead)):
+            if isinstance(child, (FeatureFusionModule, BiSeNetOutput, PlaneAuxHead, PlaneAuxSetCriterionHead)):
                 lr_mul_wd_params += child_wd_params
                 lr_mul_nowd_params += child_nowd_params
             else:
