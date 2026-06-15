@@ -23,3 +23,5 @@
 #   Option B: Fine weight search     →  w=0.06, start_iter=20000
 #   Option C: Accept baseline wins   →  use baseline_no_plane as final model
 # ============================================================
+
+## .3, 20k
