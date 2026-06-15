@@ -8,3 +8,4 @@ modules/*
 nets/*
 data/*
 soft_targets/*
+predictions/*

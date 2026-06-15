@@ -386,3 +386,5 @@ cd /home/husky/Downloads/Pragat/STDC-Seg-Mod && python scripts/precompute_soft_t
   --use_boundary_4 False \
   --use_boundary_8 False \
   --use_boundary_16 False
+
+

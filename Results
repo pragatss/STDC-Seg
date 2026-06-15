@@ -1,0 +1,25 @@
+# ============================================================
+# RANKED SUMMARY (all runs, sorted by maxmIOU50 desc)
+# ============================================================
+# Rank | Run              | weight | start_iter | maxmIOU50 | maxmIOU75 | Notes
+# -----|------------------|--------|------------|-----------|-----------|------
+#  1   | baseline_no_plane|  —     |  —         |  0.5378   |  0.5719   | *** BEST OVERALL — no plane aux
+#  2   | w005_delay20k    |  0.05  |  20000     |  0.5315   |  0.5650   | *** BEST PLANE-AUX
+#  3   | w007_delay20k    |  0.07  |  20000     |  0.5306   |  0.5645   |
+#  4   | w005_delay15k    |  0.05  |  15000     |  0.5215   |  0.5602   |
+#  5   | w002_delay20k    |  0.02  |  20000     |  0.5209   |  0.5595   |
+#  6   | w003_delay20k    |  0.03  |  20000     |  0.5201   |  0.5649   | mIOU75 near #2 but mIOU50 low
+#  7   | w010_delay20k    |  0.10  |  20000     |  0.5180   |  0.5570   | (RUN6 label says .01, cmd is 0.1)
+#  8   | w005_delay30k    |  0.05  |  30000     |  0.5180   |  0.5570   | (RUN5 no result; RUN6 used same respath)
+#  9   | w050_delay20k    |  0.50  |  20000     |  0.5094   |  0.5487   | weight too high
+# ============================================================
+# KEY OBSERVATIONS
+#   - Best start_iter is 20000. Earlier (15k) and later (30k) both hurt.
+#   - Best weight is 0.05. Going higher (0.07, 0.10, 0.50) hurts mIOU50.
+#   - Plane-aux has NOT beaten baseline yet (gap: -0.0063 mIOU50, -0.0069 mIOU75).
+#
+# NEXT STEPS (if continuing plane-aux search)
+#   Option A: Fill missing ablation  →  w=0.05, start_iter=0  (from beginning)
+#   Option B: Fine weight search     →  w=0.06, start_iter=20000
+#   Option C: Accept baseline wins   →  use baseline_no_plane as final model
+# ============================================================
