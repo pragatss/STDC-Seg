@@ -403,6 +403,26 @@ def parse_args():
                    'saving ~12 GB of VRAM and removing per-iteration teacher '
                    'forward passes entirely.',
             )
+    # -----------------------------------------------------------------
+    # In-training visualisation args
+    # -----------------------------------------------------------------
+    parse.add_argument(
+            '--viz_start_iter',
+            dest='viz_start_iter',
+            type=int,
+            default=0,
+            help='Save seg + plane prediction images starting from this iteration '
+                 '(0 = disabled).  Images are saved every --save_iter_sep iters '
+                 'from viz_start_iter onwards to <respath>/viz/.',
+            )
+    parse.add_argument(
+            '--viz_images_dir',
+            dest='viz_images_dir',
+            type=str,
+            default=None,
+            help='Directory of .png/.jpg images to run through the model for '
+                 'visualisation.  Defaults to scripts/images/ inside the repo.',
+            )
     return parse.parse_args()
 
 
@@ -750,6 +770,133 @@ def _collate_st_aware(batch):
     valid = next(s for s in sts if s is not None)
     sts_filled = [s if s is not None else torch.zeros_like(valid) for s in sts]
     return ims_col, lbs_col, default_collate(sts_filled)
+
+
+# ============================================================
+# In-training visualisation helper
+# ============================================================
+
+# 19-class Cityscapes colour palette (RGB) – standard colour table used by
+# the official Cityscapes scripts (same order as the 19 training IDs).
+_CS_VIZ_PALETTE = [
+    (128,  64, 128), (244,  35, 232), ( 70,  70,  70), (102, 102, 156),
+    (190, 153, 153), (153, 153, 153), (250, 170,  30), (220, 220,   0),
+    (107, 142,  35), (152, 251, 152), ( 70, 130, 180), (220,  20,  60),
+    (255,   0,   0), (  0,   0, 142), (  0,   0,  70), (  0,  60, 100),
+    (  0,  80, 100), (  0,   0, 230), (119,  11,  32),
+]
+
+# 20 perceptually distinct colours for plane-query visualisation.
+_QUERY_VIZ_PALETTE = [
+    (230,  25,  75), ( 60, 180,  75), (255, 225,  25), (  0, 130, 200),
+    (245, 130,  48), (145,  30, 180), ( 70, 240, 240), (240,  50, 230),
+    (210, 245,  60), (250, 190, 212), (  0, 128, 128), (220, 190, 255),
+    (170, 110,  40), (255, 250, 200), (128,   0,   0), (170, 255, 195),
+    (128, 128,   0), (255, 215, 180), (  0,   0, 128), (128, 128, 128),
+]
+
+
+def _label_to_color(label_map, palette):
+    """Convert an (H, W) integer label map to an (H, W, 3) uint8 RGB image."""
+    h, w = label_map.shape
+    out = np.zeros((h, w, 3), dtype=np.uint8)
+    for cls_id, rgb in enumerate(palette):
+        out[label_map == cls_id] = rgb
+    return out
+
+
+def save_viz_predictions(net, images_dir, out_dir, it, use_plane_aux):
+    """
+    Run *net* (already in eval mode) on every image in *images_dir* and save
+    two sets of colourised PNGs to ``<out_dir>/iter_{it:07d}/``:
+
+    * ``seg/``   – segmentation head argmax colourised with the Cityscapes palette.
+    * ``plane/`` – plane-query argmax (sigmoid → argmax over Q queries) colourised
+                   with a 20-colour palette.  Written only when *use_plane_aux* is
+                   truthy **and** the model returns a ``pred_masks`` dict entry.
+
+    The function imports PIL lazily so it never adds a hard dependency at the
+    module level for training runs that do not use visualisation.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning('[viz] Pillow not installed – skipping visualisation.')
+        return
+
+    import glob
+
+    if not os.path.isdir(images_dir):
+        logger.warning('[viz] images_dir={!r} not found, skipping.'.format(images_dir))
+        return
+
+    img_paths = sorted(
+        glob.glob(os.path.join(images_dir, '*.png'))
+        + glob.glob(os.path.join(images_dir, '*.jpg'))
+        + glob.glob(os.path.join(images_dir, '*.jpeg'))
+    )
+    if not img_paths:
+        logger.warning('[viz] no images found in {!r}, skipping.'.format(images_dir))
+        return
+
+    seg_dir   = os.path.join(out_dir, 'iter_{:07d}'.format(it), 'seg')
+    plane_dir = os.path.join(out_dir, 'iter_{:07d}'.format(it), 'plane')
+    os.makedirs(seg_dir, exist_ok=True)
+    if use_plane_aux:
+        os.makedirs(plane_dir, exist_ok=True)
+
+    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
+    std  = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+
+    # Use the underlying module when wrapped in DistributedDataParallel.
+    raw_net = net.module if hasattr(net, 'module') else net
+    device  = next(raw_net.parameters()).device
+
+    with torch.no_grad():
+        for img_path in img_paths:
+            img_pil = Image.open(img_path).convert('RGB')
+            w_orig, h_orig = img_pil.size
+
+            tensor = torch.from_numpy(
+                np.array(img_pil, dtype=np.float32) / 255.0
+            ).permute(2, 0, 1)          # HWC → CHW
+            tensor = (tensor - mean) / std
+            tensor = tensor.unsqueeze(0).to(device)   # 1,3,H,W
+
+            model_out = raw_net(tensor)
+
+            # Index 0 is always feat_out (seg logits), regardless of how many
+            # auxiliary heads are active.
+            feat_out = model_out[0] if isinstance(model_out, (tuple, list)) else model_out
+
+            # ── Seg head ──────────────────────────────────────────────────
+            seg_logits = F.interpolate(
+                feat_out, size=(h_orig, w_orig),
+                mode='bilinear', align_corners=True,
+            )
+            seg_label = seg_logits.argmax(dim=1)[0].cpu().numpy()   # H,W
+            seg_color = _label_to_color(seg_label, _CS_VIZ_PALETTE)
+            stem = os.path.splitext(os.path.basename(img_path))[0]
+            Image.fromarray(seg_color).save(os.path.join(seg_dir, stem + '.png'))
+
+            # ── Plane head ────────────────────────────────────────────────
+            if use_plane_aux and isinstance(model_out, (tuple, list)):
+                plane_dict = next(
+                    (item for item in model_out if isinstance(item, dict) and 'pred_masks' in item),
+                    None,
+                )
+                if plane_dict is not None:
+                    # pred_masks: (1, Q, H_enc, W_enc) — upsample to input size
+                    masks = plane_dict['pred_masks'][0].sigmoid()   # Q,H,W
+                    masks = F.interpolate(
+                        masks.unsqueeze(0), size=(h_orig, w_orig),
+                        mode='bilinear', align_corners=True,
+                    )[0]                                            # Q,H,W
+                    q_label  = masks.argmax(dim=0).cpu().numpy()   # H,W  ∈ [0,Q-1]
+                    q_color  = _label_to_color(q_label, _QUERY_VIZ_PALETTE)
+                    Image.fromarray(q_color).save(os.path.join(plane_dir, stem + '.png'))
+
+    logger.info('[viz] iter {:,d} – saved predictions to {}'.format(it, out_dir))
 
 
 def train():
@@ -1625,6 +1772,28 @@ def train():
             
             logger.info('mIOU50 is: {}, mIOU75 is: {}'.format(mIOU50, mIOU75))
             logger.info('maxmIOU50 is: {}, maxmIOU75 is: {}.'.format(maxmIOU50, maxmIOU75))
+
+            # ── In-training visualisation (seg + plane heads) ──────────────
+            # Enabled when --viz_start_iter > 0 and we have reached that iter.
+            # net is already in eval mode here; we reuse that to avoid an
+            # extra .eval()/.train() round-trip.
+            _viz_start = args.viz_start_iter if args.viz_start_iter > 0 else None
+            if _viz_start is not None and (it + 1) >= _viz_start:
+                _viz_images = args.viz_images_dir
+                if _viz_images is None:
+                    # default: scripts/images/ next to this file
+                    _viz_images = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        'scripts', 'images',
+                    )
+                _viz_out = os.path.join(args.respath, 'viz')
+                save_viz_predictions(
+                    net=net,
+                    images_dir=_viz_images,
+                    out_dir=_viz_out,
+                    it=it + 1,
+                    use_plane_aux=use_plane_aux,
+                )
 
             net.train()
     

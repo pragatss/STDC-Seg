@@ -1,0 +1,156 @@
+
+================================================================================
+CURRENT RUN: plane_setcriterion_w015_layers16
+Changes from w005_delay20k:
+  - plane_loss_weight:      0.05  → 0.15  (3x stronger gradient signal)
+  - plane_aux_start_iter:   20000 → 0     (train jointly from scratch)
+  - plane_aux_decoder_layers: 10  → 16    (more transformer capacity)
+================================================================================
+
+COMMAND
+-------
+PYTHONPATH=/home/husky/Downloads/Pragat/STDC-Seg-Mod CUDA_VISIBLE_DEVICES=0 conda run -n stdcseg18 --no-capture-output torchrun --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC1-Seg/plane_setcriterion_w015_layers16 \
+  --backbone STDCNet813 \
+  --mode train \
+  --use_boundary_8 false \
+  --use_boundary_4 false \
+  --use_boundary_2 false \
+  --use_boundary_16 false \
+  --use_plane_aux true \
+  --plane_aux_mode setcriterion \
+  --plane_aux_tap fuse \
+  --plane_aux_num_queries 20 \
+  --plane_aux_num_classes 20 \
+  --plane_aux_hidden_dim 256 \
+  --plane_aux_decoder_layers 16 \
+  --plane_set_cost_class 2.0 \
+  --plane_set_cost_mask 5.0 \
+  --plane_set_cost_dice 5.0 \
+  --plane_set_num_points 3072 \
+  --plane_set_oversample_ratio 3.0 \
+  --plane_set_importance_sample_ratio 0.75 \
+  --plane_set_eos_coef 0.1 \
+  --plane_set_weight_ce 2.0 \
+  --plane_set_weight_mask 5.0 \
+  --plane_set_weight_dice 5.0 \
+  --soft_targets_dir soft_targets \
+  --plane_loss_weight 0.15 \
+  --plane_aux_start_iter 0 \
+  --n_img_per_gpu 4 \
+  --max_iter 60000 \
+  --save_iter_sep 1000
+
+
+================================================================================
+WHAT TO WATCH
+================================================================================
+
+SIGNAL 1 — Does plane_aux_loss drop in the first 10k iters?
+------------------------------------------------------------
+  GOOD: 17 → 14 → 11 → 9 → ...  (actively decreasing)
+  BAD:  17 → 17 → 17 → 17       (flatline from the start)
+
+  If BAD → soft targets are not loading or there is a bug.
+  Check: does soft_targets/ directory exist and contain .npy files?
+
+SIGNAL 2 — Does plane_aux_loss break below 6.9 by iter 30-40k?
+---------------------------------------------------------------
+  6.9 is the ceiling the previous run (w005_delay20k) hit and never broke.
+  GOOD: loss reaches 5.0, 4.0, or lower → changes are working
+  BAD:  loss plateaus again at ~6.9     → see next steps below
+
+SIGNAL 3 — Does seg mIOU recover by iter 60k?
+---------------------------------------------
+  Reference: baseline_no_plane finished at mIOU50 ~0.53
+  Starting plane loss from iter 0 WILL hurt early mIOU — expect a dip.
+  GOOD: finishes at mIOU50 >= 0.50
+  BAD:  finishes at mIOU50 < 0.45 → weight 0.15 is too aggressive
+
+
+================================================================================
+NEXT STEPS IF BAD
+================================================================================
+
+SCENARIO A — plane_aux_loss flatlines at ~17 from iter 0
+---------------------------------------------------------
+  Cause: soft targets not loading, model not seeing plane loss at all.
+  Fix: verify soft_targets/ directory and rerun same command.
+
+  Check with:
+    ls soft_targets/ | head -5
+    # should show .npy files, one per Cityscapes training image
+
+
+SCENARIO B — plane_aux_loss drops to ~6.9 then plateaus again
+--------------------------------------------------------------
+  Cause: model capacity or soft target quality is the bottleneck,
+         not gradient signal.
+
+  Option B1 — Increase decoder layers further (capacity):
+    PYTHONPATH=/home/husky/Downloads/Pragat/STDC-Seg-Mod CUDA_VISIBLE_DEVICES=0 conda run -n stdcseg18 --no-capture-output torchrun --nproc_per_node=1 train.py \
+      --respath checkpoints/train_STDC1-Seg/plane_setcriterion_w015_layers20 \
+      --backbone STDCNet813 \
+      --mode train \
+      --use_boundary_8 false --use_boundary_4 false \
+      --use_boundary_2 false --use_boundary_16 false \
+      --use_plane_aux true \
+      --plane_aux_mode setcriterion \
+      --plane_aux_tap fuse \
+      --plane_aux_num_queries 20 \
+      --plane_aux_num_classes 20 \
+      --plane_aux_hidden_dim 256 \
+      --plane_aux_decoder_layers 20 \
+      --plane_set_cost_class 2.0 --plane_set_cost_mask 5.0 --plane_set_cost_dice 5.0 \
+      --plane_set_num_points 3072 --plane_set_oversample_ratio 3.0 \
+      --plane_set_importance_sample_ratio 0.75 --plane_set_eos_coef 0.1 \
+      --plane_set_weight_ce 2.0 --plane_set_weight_mask 5.0 --plane_set_weight_dice 5.0 \
+      --soft_targets_dir soft_targets \
+      --plane_loss_weight 0.15 \
+      --plane_aux_start_iter 0 \
+      --n_img_per_gpu 4 --max_iter 60000 --save_iter_sep 1000
+
+  Option B2 — Increase weight further (stronger signal):
+    Same command as current run but:
+      --plane_loss_weight 0.25
+      --respath checkpoints/train_STDC1-Seg/plane_setcriterion_w025_layers16
+
+
+SCENARIO C — seg mIOU finishes below 0.45 (weight too aggressive)
+------------------------------------------------------------------
+  Cause: plane loss at weight 0.15 is overwhelming the seg training.
+  Fix: reduce weight and add a short delay so backbone stabilizes first.
+
+    PYTHONPATH=/home/husky/Downloads/Pragat/STDC-Seg-Mod CUDA_VISIBLE_DEVICES=0 conda run -n stdcseg18 --no-capture-output torchrun --nproc_per_node=1 train.py \
+      --respath checkpoints/train_STDC1-Seg/plane_setcriterion_w010_delay5k_layers16 \
+      --backbone STDCNet813 \
+      --mode train \
+      --use_boundary_8 false --use_boundary_4 false \
+      --use_boundary_2 false --use_boundary_16 false \
+      --use_plane_aux true \
+      --plane_aux_mode setcriterion \
+      --plane_aux_tap fuse \
+      --plane_aux_num_queries 20 \
+      --plane_aux_num_classes 20 \
+      --plane_aux_hidden_dim 256 \
+      --plane_aux_decoder_layers 16 \
+      --plane_set_cost_class 2.0 --plane_set_cost_mask 5.0 --plane_set_cost_dice 5.0 \
+      --plane_set_num_points 3072 --plane_set_oversample_ratio 3.0 \
+      --plane_set_importance_sample_ratio 0.75 --plane_set_eos_coef 0.1 \
+      --plane_set_weight_ce 2.0 --plane_set_weight_mask 5.0 --plane_set_weight_dice 5.0 \
+      --soft_targets_dir soft_targets \
+      --plane_loss_weight 0.10 \
+      --plane_aux_start_iter 5000 \
+      --n_img_per_gpu 4 --max_iter 60000 --save_iter_sep 1000
+
+
+================================================================================
+REFERENCE: w005_delay20k RESULTS (previous run)
+================================================================================
+  plane_aux_loss at turn-on (iter 20k): ~17.5
+  plane_aux_loss at end (iter 60k):     ~6.9   (plateau, never broke through)
+  plane % of total loss at turn-on:      19%
+  plane % of total loss at end:          10%
+  final mIOU50:  0.531
+  final mIOU75:  0.565
+  plane predictions: partially learned but visually poor (queries not specialized)
