@@ -282,6 +282,14 @@ class BiSeNet(nn.Module):
         feat_fuse = self.ffm(feat_res8, feat_cp8)
 
         feat_out = self.conv_out(feat_fuse)
+
+# Answer to your real question
+# You do not need a new head — self.conv_out16 already produces 19‑class logits at stride 8 internally, at line 285, from feat_cp8. But forward() throws that resolution away via the F.interpolate at line 289 before returning it. To get stride‑8 logits without adding a head, either:
+
+# call self.conv_out16(feat_cp8) directly (bypass forward()), or
+# add a return value / remove the interpolate for that branch in forward().
+# Either way it's a 1–2 line change to forward(), not a new module.
+
         feat_out16 = self.conv_out16(feat_cp8)
         feat_out32 = self.conv_out32(feat_cp16)
 
