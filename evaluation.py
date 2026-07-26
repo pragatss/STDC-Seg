@@ -63,12 +63,15 @@ class MscEvalV0(object):
         miou = ious.mean()
         return miou.item()
 
-def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False):
+def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, use_sbg=False, use_variance=False, use_semantic=False):
     print('scale', scale)
     print('use_boundary_2', use_boundary_2)
     print('use_boundary_4', use_boundary_4)
     print('use_boundary_8', use_boundary_8)
     print('use_boundary_16', use_boundary_16)
+    print('use_sbg', use_sbg)
+    print('use_variance', use_variance)
+    print('use_semantic', use_semantic)
     ## dataset
     batchsize = 5
     n_workers = 2
@@ -82,13 +85,17 @@ def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', sc
     n_classes = 19
     print("backbone:", backbone)
     net = BiSeNet(backbone=backbone, n_classes=n_classes,
-     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, 
-     use_boundary_8=use_boundary_8, use_boundary_16=use_boundary_16, 
-     use_conv_last=use_conv_last)
+     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4,
+     use_boundary_8=use_boundary_8, use_boundary_16=use_boundary_16,
+     use_conv_last=use_conv_last, use_sbg=use_sbg, use_variance=use_variance,
+     use_semantic=use_semantic)
     net.load_state_dict(torch.load(respth))
+    assert net.use_sbg == use_sbg and net.sbg.use_variance == use_variance and net.sbg.use_semantic == use_semantic, \
+        f"flag mismatch after load_state_dict: net.use_sbg={net.use_sbg}, net.sbg.use_variance={net.sbg.use_variance}, net.sbg.use_semantic={net.sbg.use_semantic}"
+    print(f"net.use_sbg={net.use_sbg}  net.sbg.use_variance={net.sbg.use_variance}  net.sbg.use_semantic={net.sbg.use_semantic}")
     net.cuda()
     net.eval()
-    
+
 
     with torch.no_grad():
         single_scale = MscEvalV0(scale=scale)
@@ -283,8 +290,12 @@ if __name__ == "__main__":
     #     use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
 
     # ARM B checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth
-    evaluatev0('./checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
-        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False) 
+    # Trained before use_sbg existed as a bypass flag, back when forward() always routed
+    # through self.sbg (appearance branch always on) -- so use_sbg=True here, NOT the
+    # (now-default) False, or this will silently evaluate the wrong computational path.
+    evaluatev0('./checkpoints/train_STDC2-Seg_ARMB/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75,
+        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False,
+        use_sbg=True, use_variance=False, use_semantic=False)
 
    
 

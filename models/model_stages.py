@@ -223,13 +223,14 @@ class FeatureFusionModule(nn.Module):
 
 
 class BiSeNet(nn.Module):
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_variance=False, use_semantic=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_sbg=False, use_variance=False, use_semantic=False, *args, **kwargs):
         super(BiSeNet, self).__init__()
 
         self.use_boundary_2 = use_boundary_2
         self.use_boundary_4 = use_boundary_4
         self.use_boundary_8 = use_boundary_8
         self.use_boundary_16 = use_boundary_16
+        self.use_sbg = use_sbg
         # self.heat_map = heat_map
         self.cp = ContextPath(backbone, pretrain_model, use_conv_last=use_conv_last)
         
@@ -269,6 +270,17 @@ class BiSeNet(nn.Module):
         # Arm flags come from config so you can change them without editing code.
         self.sbg = SBG(feat_chan=sp8_inplanes, n_classes=n_classes,
                         use_variance=use_variance, use_semantic=use_semantic)
+
+        if not use_sbg:
+            arm_name = "Arm A: SBG disabled (pre-SBG baseline)"
+        elif use_variance and use_semantic:
+            arm_name = "Arm D: full SBG (variance + semantic)"
+        elif use_variance:
+            arm_name = "Arm C: appearance + variance"
+        else:
+            arm_name = "Arm B: appearance only"
+        print(f"[BiSeNet] SBG {arm_name}  (use_sbg={use_sbg}, use_variance={use_variance}, use_semantic={use_semantic})")
+
         self.init_weight()
 
     def forward(self, x):
@@ -285,8 +297,12 @@ class BiSeNet(nn.Module):
         # Compute context logits at stride 8 BEFORE the FFM (moved up).
         feat_out16_s8 = self.conv_out16(feat_cp8)
 
-        # SBG: refine detail features, emit the boundary logit.
-        feat_res8_ref, feat_out_sp8 = self.sbg(feat_res8, feat_out16_s8)
+        if self.use_sbg:
+            # SBG: refine detail features, emit the boundary logit.
+            feat_res8_ref, feat_out_sp8 = self.sbg(feat_res8, feat_out16_s8)
+        else:
+            feat_res8_ref = feat_res8
+            feat_out_sp8 = self.conv_out_sp8(feat_res8)
 
         feat_fuse = self.ffm(feat_res8_ref, feat_cp8)  # refined, not raw
 

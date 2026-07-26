@@ -15,7 +15,7 @@ mIOU is: 0.7599517703056335
 ARM B, checkpoint 4 use_variance false use_segmentation false
 export CUDA_VISIBLE_DEVICES=0
 /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
-  --respath checkpoints/train_STDC2-Seg/ \
+  --respath checkpoints/train_STDC2-Seg-ARM-B/ \
   --backbone STDCNet1446 \
   --mode train \
   --n_workers_train 12 \
@@ -36,7 +36,7 @@ mIOU is: 0.752235472202301
 ARM C, checkpoint 5 use_variance true use_segmentation false
 export CUDA_VISIBLE_DEVICES=0
 /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
-  --respath checkpoints/train_STDC2-Seg/ \
+  --respath checkpoints/train_STDC2-Seg-ARM-C/ \
   --backbone STDCNet1446 \
   --mode train \
   --n_workers_train 12 \
