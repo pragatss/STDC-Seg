@@ -1,11 +1,11 @@
 baseline
-python -m torch.distributed.launch --nproc_per_node=3 train.py --respath checkpoints/train_STDC2-Seg/ --backbone STDCNet1446 --mode train --n_workers_train 12 --n_workers_val 1 --max_iter 60000 --use_boundary_8 True --pretrain_path checkpoints/STDCNet1446_76.47.tar
+python -m torch.distributed.launch --nproc_per_node=1 train.py --respath checkpoints/train_STDC2-Seg/ --backbone STDCNet1446 --mode train --n_workers_train 12 --n_workers_val 1 --max_iter 60000 --use_boundary_8 True --pretrain_path checkpoints/STDCNet1446_76.47.tar
 
 res on train:
 max mIOU model saved to: checkpoints/train_STDC2-Seg/pths/model_maxmIOU50.pth
 max mIOU model saved to: checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth
-mIOU50 is: 0.7149436473846436, mIOU75 is: 0.7517025470733643
-maxmIOU50 is: 0.7149436473846436, maxmIOU75 is: 0.7517025470733643.
+mIOU50 is: 0.7217114567756653, mIOU75 is: 0.7599517703056335
+maxmIOU50 is: 0.7217114567756653, maxmIOU75 is: 0.7599517703056335.
 
 res on eval
 evaluatev0('./checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
