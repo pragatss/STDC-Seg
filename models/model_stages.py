@@ -10,6 +10,7 @@ import torchvision
 
 from nets.stdcnet import STDCNet1446, STDCNet813
 from modules.bn import InPlaceABNSync as BatchNorm2d
+from models.sbg import SBG
 # BatchNorm2d = nn.BatchNorm2d
 
 class ConvBNReLU(nn.Module):
@@ -222,9 +223,9 @@ class FeatureFusionModule(nn.Module):
 
 
 class BiSeNet(nn.Module):
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_variance=False, use_semantic=False, *args, **kwargs):
         super(BiSeNet, self).__init__()
-        
+
         self.use_boundary_2 = use_boundary_2
         self.use_boundary_4 = use_boundary_4
         self.use_boundary_8 = use_boundary_8
@@ -264,6 +265,10 @@ class BiSeNet(nn.Module):
         self.conv_out_sp8 = BiSeNetOutput(sp8_inplanes, 64, 1)
         self.conv_out_sp4 = BiSeNetOutput(sp4_inplanes, 64, 1)
         self.conv_out_sp2 = BiSeNetOutput(sp2_inplanes, 64, 1)
+
+        # Arm flags come from config so you can change them without editing code.
+        self.sbg = SBG(feat_chan=sp8_inplanes, n_classes=n_classes,
+                        use_variance=use_variance, use_semantic=use_semantic)
         self.init_weight()
 
     def forward(self, x):
@@ -274,27 +279,22 @@ class BiSeNet(nn.Module):
         feat_out_sp2 = self.conv_out_sp2(feat_res2)
 
         feat_out_sp4 = self.conv_out_sp4(feat_res4)
-  
-        feat_out_sp8 = self.conv_out_sp8(feat_res8)
 
         feat_out_sp16 = self.conv_out_sp16(feat_res16)
 
-        feat_fuse = self.ffm(feat_res8, feat_cp8)
+        # Compute context logits at stride 8 BEFORE the FFM (moved up).
+        feat_out16_s8 = self.conv_out16(feat_cp8)
+
+        # SBG: refine detail features, emit the boundary logit.
+        feat_res8_ref, feat_out_sp8 = self.sbg(feat_res8, feat_out16_s8)
+
+        feat_fuse = self.ffm(feat_res8_ref, feat_cp8)  # refined, not raw
 
         feat_out = self.conv_out(feat_fuse)
-
-# Answer to your real question
-# You do not need a new head — self.conv_out16 already produces 19‑class logits at stride 8 internally, at line 285, from feat_cp8. But forward() throws that resolution away via the F.interpolate at line 289 before returning it. To get stride‑8 logits without adding a head, either:
-
-# call self.conv_out16(feat_cp8) directly (bypass forward()), or
-# add a return value / remove the interpolate for that branch in forward().
-# Either way it's a 1–2 line change to forward(), not a new module.
-
-        feat_out16 = self.conv_out16(feat_cp8)
         feat_out32 = self.conv_out32(feat_cp16)
 
         feat_out = F.interpolate(feat_out, (H, W), mode='bilinear', align_corners=True)
-        feat_out16 = F.interpolate(feat_out16, (H, W), mode='bilinear', align_corners=True)
+        feat_out16 = F.interpolate(feat_out16_s8, (H, W), mode='bilinear', align_corners=True)
         feat_out32 = F.interpolate(feat_out32, (H, W), mode='bilinear', align_corners=True)
 
 

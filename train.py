@@ -136,6 +136,18 @@ def parse_args():
             type = str2bool,
             default = False,
             )
+    parse.add_argument(
+            '--use_variance',
+            dest = 'use_variance',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
+            '--use_semantic',
+            dest = 'use_semantic',
+            type = str2bool,
+            default = False,
+            )
     return parse.parse_args()
 
 
@@ -206,9 +218,10 @@ def train():
 
     ## model
     ignore_idx = 255
-    net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
-    use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
-    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last)
+    net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path,
+    use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8,
+    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
+    use_variance=args.use_variance, use_semantic=args.use_semantic)
 
     if not args.ckpt is None:
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))

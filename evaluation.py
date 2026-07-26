@@ -273,9 +273,18 @@ if __name__ == "__main__":
     # evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU50.pth', dspth='./data', backbone='STDCNet1446', scale=0.5, 
     # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
 
-    #STDC2-Seg75 mIoU 0.7704
-    evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
-    use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
+    # #STDC2-Seg75 mIoU 0.7704
+    # evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
+    # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
+
+    #baseline run 
+    # evaluation: 0.7599517703056335
+    # evaluatev0('./checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
+    #     use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
+
+    # ARM B checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth
+    evaluatev0('./checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
+        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False) 
 
    
 
