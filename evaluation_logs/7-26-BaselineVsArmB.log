@@ -1,0 +1,137 @@
+stdcseg18) husky@husky:~/Downloads/Pragat/7-12-26-STDCSeg/STDC-Seg$ CUDA_VISIBLE_DEVICES=0 python evaluation.py
+/home/husky/anaconda3/envs/stdcseg18/lib/python3.8/site-packages/torch/utils/cpp_extension.py:1965: UserWarning: TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'].
+  warnings.warn(
+/home/husky/anaconda3/envs/stdcseg18/lib/python3.8/site-packages/scipy/__init__.py:146: UserWarning: A NumPy version >=1.16.5 and <1.23.0 is required for this version of SciPy (detected version 1.24.4
+  warnings.warn(f"A NumPy version >={np_minversion} and <{np_maxversion}"
+checkpoint_path ./checkpoints/train_STDC2-Seg-Baseline/pths/model_maxmIOU75.pth
+backbone STDCNet1446
+scale 0.75
+radius 1
+use_boundary_2 False
+use_boundary_4 False
+use_boundary_8 True
+use_boundary_16 False
+use_sbg False
+use_variance False
+use_semantic False
+self.mode val
+self.len val 500
+[BiSeNet] SBG Arm A: SBG disabled (pre-SBG baseline)  (use_sbg=False, use_variance=False, use_semantic=False)
+evaluation.py:236: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  missing, unexpected = net.load_state_dict(torch.load(checkpoint_path), strict=False)
+checkpoint has no sbg.* weights (pre-SBG checkpoint) -- 6 keys left at random init, unused since use_sbg=False
+net.use_sbg=False  net.sbg.use_variance=False  net.sbg.use_semantic=False
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [03:34<00:00,  2.14s/it]
+  0%|                                                                                                          | 0/100 [00:00<?, ?it/s]evaluation.py:138: UserWarning: indexing with dtype torch.uint8 is now deprecated, please use a dtype torch.bool instead. (Triggered internally at ../aten/src/ATen/native/IndexingUtils.h:27.)
+  label[keep] * n_classes + preds[keep],
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [03:02<00:00,  1.83s/it]
+boundary band (radius=1) covers 2.94% of pixels (sanity check: expect roughly 5-8% at radius=3 on Cityscapes)
+checkpoint_path ./checkpoints/train_STDC2-Seg-Baseline/pths/model_maxmIOU75.pth
+backbone STDCNet1446
+scale 0.75
+radius 3
+use_boundary_2 False
+use_boundary_4 False
+use_boundary_8 True
+use_boundary_16 False
+use_sbg False
+use_variance False
+use_semantic False
+self.mode val
+self.len val 500
+[BiSeNet] SBG Arm A: SBG disabled (pre-SBG baseline)  (use_sbg=False, use_variance=False, use_semantic=False)
+checkpoint has no sbg.* weights (pre-SBG checkpoint) -- 6 keys left at random init, unused since use_sbg=False
+net.use_sbg=False  net.sbg.use_variance=False  net.sbg.use_semantic=False
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [02:05<00:00,  1.26s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [02:22<00:00,  1.42s/it]
+boundary band (radius=3) covers 5.56% of pixels (sanity check: expect roughly 5-8% at radius=3 on Cityscapes)
+
+================================================================
+full-image mIoU:              0.7600
+boundary-region IoU (r=1):    0.3499
+boundary-region IoU (r=3):    0.4287
+================================================================
+per-class boundary IoU (r=3):
+  wall            0.2559
+  fence           0.2998
+  motorcycle      0.3028
+  train           0.3145
+  terrain         0.3578
+  truck           0.3582
+  rider           0.3718
+  traffic light   0.4137
+  pole            0.4259
+  bicycle         0.4299
+  traffic sign    0.4556
+  bus             0.4620
+  person          0.4788
+  building        0.4921
+  sidewalk        0.5047
+  vegetation      0.5172
+  road            0.5541
+  sky             0.5683
+  car             0.5830
+checkpoint_path ./checkpoints/train_STDC2-Seg_ARMB/pths/model_maxmIOU75.pth
+backbone STDCNet1446
+scale 0.75
+radius 1
+use_boundary_2 False
+use_boundary_4 False
+use_boundary_8 True
+use_boundary_16 False
+use_sbg True
+use_variance False
+use_semantic False
+self.mode val
+self.len val 500
+[BiSeNet] SBG Arm B: appearance only  (use_sbg=True, use_variance=False, use_semantic=False)
+net.use_sbg=True  net.sbg.use_variance=False  net.sbg.use_semantic=False
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [02:07<00:00,  1.27s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [02:25<00:00,  1.46s/it]
+boundary band (radius=1) covers 2.94% of pixels (sanity check: expect roughly 5-8% at radius=3 on Cityscapes)
+checkpoint_path ./checkpoints/train_STDC2-Seg_ARMB/pths/model_maxmIOU75.pth
+backbone STDCNet1446
+scale 0.75
+radius 3
+use_boundary_2 False
+use_boundary_4 False
+use_boundary_8 True
+use_boundary_16 False
+use_sbg True
+use_variance False
+use_semantic False
+self.mode val
+self.len val 500
+[BiSeNet] SBG Arm B: appearance only  (use_sbg=True, use_variance=False, use_semantic=False)
+net.use_sbg=True  net.sbg.use_variance=False  net.sbg.use_semantic=False
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [02:05<00:00,  1.25s/it]
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 100/100 [02:22<00:00,  1.42s/it]
+boundary band (radius=3) covers 5.56% of pixels (sanity check: expect roughly 5-8% at radius=3 on Cityscapes)
+
+================================================================
+full-image mIoU:              0.7522
+boundary-region IoU (r=1):    0.3428
+boundary-region IoU (r=3):    0.4200
+================================================================
+per-class boundary IoU (r=3):
+  wall            0.2609
+  fence           0.2872
+  motorcycle      0.3111
+  train           0.3159
+  terrain         0.3457
+  truck           0.3580
+  rider           0.3729
+  traffic light   0.3853
+  bicycle         0.4042
+  pole            0.4226
+  bus             0.4297
+  traffic sign    0.4313
+  person          0.4730
+  building        0.4911
+  sidewalk        0.5017
+  vegetation      0.5058
+  road            0.5445
+  sky             0.5606
+  car             0.5783
+(stdcseg18) husky@husky:~/Downloads/Pragat/7-12-26-STDCSeg/STDC-Seg$ 

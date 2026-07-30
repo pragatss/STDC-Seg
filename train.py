@@ -137,6 +137,12 @@ def parse_args():
             default = False,
             )
     parse.add_argument(
+            '--use_sbg',
+            dest = 'use_sbg',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
             '--use_variance',
             dest = 'use_variance',
             type = str2bool,
@@ -194,6 +200,9 @@ def train():
         logger.info('use_boundary_4: {}'.format(use_boundary_4))
         logger.info('use_boundary_8: {}'.format(use_boundary_8))
         logger.info('use_boundary_16: {}'.format(use_boundary_16))
+        logger.info('use_sbg: {}'.format(args.use_sbg))
+        logger.info('use_variance: {}'.format(args.use_variance))
+        logger.info('use_semantic: {}'.format(args.use_semantic))
         logger.info('mode: {}'.format(args.mode))
     
     
@@ -221,7 +230,7 @@ def train():
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path,
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8,
     use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
-    use_variance=args.use_variance, use_semantic=args.use_semantic)
+    use_sbg=args.use_sbg, use_variance=args.use_variance, use_semantic=args.use_semantic)
 
     if not args.ckpt is None:
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
