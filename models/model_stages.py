@@ -223,14 +223,17 @@ class FeatureFusionModule(nn.Module):
 
 
 class BiSeNet(nn.Module):
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_sbg=False, use_variance=False, use_semantic=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_sbg=False, use_variance=False, use_semantic=False, semantic_source='lr', *args, **kwargs):
         super(BiSeNet, self).__init__()
 
+        assert semantic_source in ('lr', 'hr'), f"semantic_source must be 'lr' or 'hr', got {semantic_source!r}"
         self.use_boundary_2 = use_boundary_2
         self.use_boundary_4 = use_boundary_4
         self.use_boundary_8 = use_boundary_8
         self.use_boundary_16 = use_boundary_16
         self.use_sbg = use_sbg
+        self.use_semantic = use_semantic
+        self.semantic_source = semantic_source
         # self.heat_map = heat_map
         self.cp = ContextPath(backbone, pretrain_model, use_conv_last=use_conv_last)
         
@@ -271,15 +274,26 @@ class BiSeNet(nn.Module):
         self.sbg = SBG(feat_chan=sp8_inplanes, n_classes=n_classes,
                         use_variance=use_variance, use_semantic=use_semantic)
 
+        # Arm E: genuine stride-8 classifier on feat_res8 (raw detail features, no
+        # feat_cp8/stride-16 contamination), feeding Branch 3 instead of feat_out16_s8.
+        # Only constructed when actually needed, so semantic_source='lr' checkpoints
+        # (every existing arm) have no new keys at all -- same precedent as conv_sem
+        # inside SBG only existing when use_semantic=True.
+        if semantic_source == 'hr':
+            self.sbg_sem_head = BiSeNetOutput(sp8_inplanes, 64, n_classes)
+
         if not use_sbg:
             arm_name = "Arm A: SBG disabled (pre-SBG baseline)"
+        elif use_variance and use_semantic and semantic_source == 'hr':
+            arm_name = "Arm E: full SBG (variance + semantic, hr source)"
         elif use_variance and use_semantic:
             arm_name = "Arm D: full SBG (variance + semantic)"
         elif use_variance:
             arm_name = "Arm C: appearance + variance"
         else:
             arm_name = "Arm B: appearance only"
-        print(f"[BiSeNet] SBG {arm_name}  (use_sbg={use_sbg}, use_variance={use_variance}, use_semantic={use_semantic})")
+        print(f"[BiSeNet] SBG {arm_name}  (use_sbg={use_sbg}, use_variance={use_variance}, "
+              f"use_semantic={use_semantic}, semantic_source={semantic_source})")
 
         self.init_weight()
 
@@ -297,9 +311,20 @@ class BiSeNet(nn.Module):
         # Compute context logits at stride 8 BEFORE the FFM (moved up).
         feat_out16_s8 = self.conv_out16(feat_cp8)
 
+        # Arm E only: genuine stride-8 classifier on raw feat_res8, no feat_cp8/stride-16
+        # contamination. feat_out_sem_hr stays None (and forward()'s return arity is
+        # completely unchanged) whenever semantic_source == 'lr' -- the default -- so
+        # this is numerically identical to the pre-Arm-E code in every existing arm.
+        feat_out_sem_hr = None
+        if self.use_sbg and self.use_semantic and self.semantic_source == 'hr':
+            feat_out_sem_hr = self.sbg_sem_head(feat_res8)
+            semantic_signal = feat_out_sem_hr
+        else:
+            semantic_signal = feat_out16_s8
+
         if self.use_sbg:
             # SBG: refine detail features, emit the boundary logit.
-            feat_res8_ref, feat_out_sp8 = self.sbg(feat_res8, feat_out16_s8)
+            feat_res8_ref, feat_out_sp8 = self.sbg(feat_res8, semantic_signal)
         else:
             feat_res8_ref = feat_res8
             feat_out_sp8 = self.conv_out_sp8(feat_res8)
@@ -312,19 +337,24 @@ class BiSeNet(nn.Module):
         feat_out = F.interpolate(feat_out, (H, W), mode='bilinear', align_corners=True)
         feat_out16 = F.interpolate(feat_out16_s8, (H, W), mode='bilinear', align_corners=True)
         feat_out32 = F.interpolate(feat_out32, (H, W), mode='bilinear', align_corners=True)
+        if feat_out_sem_hr is not None:
+            feat_out_sem_hr = F.interpolate(feat_out_sem_hr, (H, W), mode='bilinear', align_corners=True)
 
 
         if self.use_boundary_2 and self.use_boundary_4 and self.use_boundary_8:
-            return feat_out, feat_out16, feat_out32, feat_out_sp2, feat_out_sp4, feat_out_sp8
-        
-        if (not self.use_boundary_2) and self.use_boundary_4 and self.use_boundary_8:
-            return feat_out, feat_out16, feat_out32, feat_out_sp4, feat_out_sp8
+            ret = (feat_out, feat_out16, feat_out32, feat_out_sp2, feat_out_sp4, feat_out_sp8)
+        elif (not self.use_boundary_2) and self.use_boundary_4 and self.use_boundary_8:
+            ret = (feat_out, feat_out16, feat_out32, feat_out_sp4, feat_out_sp8)
+        elif (not self.use_boundary_2) and (not self.use_boundary_4) and self.use_boundary_8:
+            ret = (feat_out, feat_out16, feat_out32, feat_out_sp8)
+        elif (not self.use_boundary_2) and (not self.use_boundary_4) and (not self.use_boundary_8):
+            ret = (feat_out, feat_out16, feat_out32)
+        else:
+            return None
 
-        if (not self.use_boundary_2) and (not self.use_boundary_4) and self.use_boundary_8:
-            return feat_out, feat_out16, feat_out32, feat_out_sp8
-        
-        if (not self.use_boundary_2) and (not self.use_boundary_4) and (not self.use_boundary_8):
-            return feat_out, feat_out16, feat_out32
+        if feat_out_sem_hr is not None:
+            return (*ret, feat_out_sem_hr)
+        return ret
 
     def init_weight(self):
         for ly in self.children():

@@ -154,6 +154,13 @@ def parse_args():
             type = str2bool,
             default = False,
             )
+    parse.add_argument(
+            '--semantic_source',
+            dest = 'semantic_source',
+            type = str,
+            choices = ['lr', 'hr'],
+            default = 'lr',
+            )
     return parse.parse_args()
 
 
@@ -188,7 +195,9 @@ def train():
     use_boundary_8 = args.use_boundary_8
     use_boundary_4 = args.use_boundary_4
     use_boundary_2 = args.use_boundary_2
-    
+    use_semantic = args.use_semantic
+    semantic_source = args.semantic_source
+
     mode = args.mode
     cropsize = [1024, 512]
     randomscale = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.375, 1.5)
@@ -203,6 +212,7 @@ def train():
         logger.info('use_sbg: {}'.format(args.use_sbg))
         logger.info('use_variance: {}'.format(args.use_variance))
         logger.info('use_semantic: {}'.format(args.use_semantic))
+        logger.info('semantic_source: {}'.format(args.semantic_source))
         logger.info('mode: {}'.format(args.mode))
     
     
@@ -230,7 +240,8 @@ def train():
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path,
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8,
     use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
-    use_sbg=args.use_sbg, use_variance=args.use_variance, use_semantic=args.use_semantic)
+    use_sbg=args.use_sbg, use_variance=args.use_variance, use_semantic=args.use_semantic,
+    semantic_source=semantic_source)
 
     if not args.ckpt is None:
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
@@ -247,6 +258,8 @@ def train():
     criteria_p = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
     criteria_16 = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
     criteria_32 = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
+    if use_semantic and semantic_source == 'hr':
+        criteria_sem_hr = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
     boundary_loss_func = DetailAggregateLoss()
     ## optimizer
     maxmIOU50 = 0.
@@ -300,14 +313,21 @@ def train():
         optim.zero_grad()
 
 
+        # semantic_source='hr' appends one extra tensor (out_sem_hr) to forward()'s
+        # return -- only wired up for the use_boundary_2/4=False, use_boundary_8=True
+        # combo actually used by these experiments. Other boundary-flag combos combined
+        # with semantic_source='hr' will fail loudly on unpacking, by design.
         if use_boundary_2 and use_boundary_4 and use_boundary_8:
             out, out16, out32, detail2, detail4, detail8 = net(im)
-        
+
         if (not use_boundary_2) and use_boundary_4 and use_boundary_8:
             out, out16, out32, detail4, detail8 = net(im)
 
         if (not use_boundary_2) and (not use_boundary_4) and use_boundary_8:
-            out, out16, out32, detail8 = net(im)
+            if use_semantic and semantic_source == 'hr':
+                out, out16, out32, detail8, out_sem_hr = net(im)
+            else:
+                out, out16, out32, detail8 = net(im)
 
         if (not use_boundary_2) and (not use_boundary_4) and (not use_boundary_8):
             out, out16, out32 = net(im)
@@ -315,7 +335,10 @@ def train():
         lossp = criteria_p(out, lb)
         loss2 = criteria_16(out16, lb)
         loss3 = criteria_32(out32, lb)
-        
+        loss_sem_hr = 0.
+        if use_semantic and semantic_source == 'hr':
+            loss_sem_hr = criteria_sem_hr(out_sem_hr, lb)
+
         boundery_bce_loss = 0.
         boundery_dice_loss = 0.
         
@@ -341,8 +364,8 @@ def train():
             boundery_bce_loss += boundery_bce_loss8
             boundery_dice_loss += boundery_dice_loss8
 
-        loss = lossp + loss2 + loss3 + boundery_bce_loss + boundery_dice_loss
-        
+        loss = lossp + loss2 + loss3 + loss_sem_hr + boundery_bce_loss + boundery_dice_loss
+
         loss.backward()
         optim.step()
 

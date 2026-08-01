@@ -151,7 +151,7 @@ class MscEvalBoundary(object):
         return miou.item(), ious
 
 
-def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, use_sbg=False, use_variance=False, use_semantic=False):
+def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, use_sbg=False, use_variance=False, use_semantic=False, semantic_source='lr'):
     print('scale', scale)
     print('use_boundary_2', use_boundary_2)
     print('use_boundary_4', use_boundary_4)
@@ -160,6 +160,7 @@ def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', sc
     print('use_sbg', use_sbg)
     print('use_variance', use_variance)
     print('use_semantic', use_semantic)
+    print('semantic_source', semantic_source)
     ## dataset
     batchsize = 5
     n_workers = 2
@@ -176,7 +177,7 @@ def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', sc
      use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4,
      use_boundary_8=use_boundary_8, use_boundary_16=use_boundary_16,
      use_conv_last=use_conv_last, use_sbg=use_sbg, use_variance=use_variance,
-     use_semantic=use_semantic)
+     use_semantic=use_semantic, semantic_source=semantic_source)
     missing, unexpected = net.load_state_dict(torch.load(respth), strict=False)
     # Checkpoints trained before SBG existed in the code at all (not just use_sbg=False,
     # but self.sbg never constructed) have no sbg.* keys. That's fine -- sbg is unused
@@ -212,7 +213,7 @@ CITYSCAPES_CLASSES = [
 def evaluate_boundary(checkpoint_path, backbone, scale=0.75, radius=3,
                        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True,
                        use_boundary_16=False, use_sbg=False, use_variance=False,
-                       use_semantic=False, dspth='./data'):
+                       use_semantic=False, semantic_source='lr', dspth='./data'):
     # NOTE: added use_sbg here even though it wasn't in the requested signature --
     # BiSeNet needs it to reconstruct the right forward-pass wiring (same reason
     # evaluatev0's use_sbg exists: checkpoints trained before use_sbg existed as a
@@ -228,6 +229,7 @@ def evaluate_boundary(checkpoint_path, backbone, scale=0.75, radius=3,
     print('use_sbg', use_sbg)
     print('use_variance', use_variance)
     print('use_semantic', use_semantic)
+    print('semantic_source', semantic_source)
 
     n_classes = 19
     batchsize = 5
@@ -242,7 +244,8 @@ def evaluate_boundary(checkpoint_path, backbone, scale=0.75, radius=3,
     net = BiSeNet(backbone=backbone, n_classes=n_classes,
      use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4,
      use_boundary_8=use_boundary_8, use_boundary_16=use_boundary_16,
-     use_sbg=use_sbg, use_variance=use_variance, use_semantic=use_semantic)
+     use_sbg=use_sbg, use_variance=use_variance, use_semantic=use_semantic,
+     semantic_source=semantic_source)
     missing, unexpected = net.load_state_dict(torch.load(checkpoint_path), strict=False)
     # Checkpoints trained before SBG existed in the code at all (not just use_sbg=False,
     # but self.sbg never constructed) have no sbg.* keys. That's fine -- sbg is unused
@@ -424,16 +427,19 @@ def evaluate(respth='./resv1_catnet/pths/', dspth='./data'):
     logger.info('mIOU is: {:.6f}'.format(mIOU))
 
 
-def run_boundary_eval(checkpoint_path, backbone, use_variance, use_semantic, use_sbg=True, scale=0.75):
-    # Reminder: pass the SAME use_sbg/use_variance/use_semantic this checkpoint was
-    # trained with. A mismatch loads without error but silently evaluates the wrong
-    # architecture (see the ARM B comment above evaluatev0's call for why).
+def run_boundary_eval(checkpoint_path, backbone, use_variance, use_semantic, use_sbg=True, scale=0.75, semantic_source='lr'):
+    # Reminder: pass the SAME use_sbg/use_variance/use_semantic/semantic_source this
+    # checkpoint was trained with. A use_variance mismatch loads without error but
+    # silently evaluates the wrong architecture (see the ARM B comment above evaluatev0's
+    # call for why); a semantic_source mismatch fails loudly at load_state_dict.
     full_miou, boundary_miou_r1, _ = evaluate_boundary(
         checkpoint_path, backbone, scale=scale, radius=1,
-        use_sbg=use_sbg, use_variance=use_variance, use_semantic=use_semantic)
+        use_sbg=use_sbg, use_variance=use_variance, use_semantic=use_semantic,
+        semantic_source=semantic_source)
     _, boundary_miou_r3, boundary_ious_r3 = evaluate_boundary(
         checkpoint_path, backbone, scale=scale, radius=3,
-        use_sbg=use_sbg, use_variance=use_variance, use_semantic=use_semantic)
+        use_sbg=use_sbg, use_variance=use_variance, use_semantic=use_semantic,
+        semantic_source=semantic_source)
 
     print()
     print("=" * 64)
@@ -523,10 +529,25 @@ if __name__ == "__main__":
     # evaluatev0('./checkpoints/train_STDC2-Seg-ARM-D/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75,
     #     use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False,
     #     use_sbg=True, use_variance=True, use_semantic=True)
+    # run_boundary_eval(
+    #     checkpoint_path='./checkpoints/train_STDC2-Seg-ARM-D/pths/model_maxmIOU75.pth',
+    #     backbone='STDCNet1446',
+    #     use_sbg=True, use_variance=True, use_semantic=True)
+
+# ARM E checkpoints/train_STDC2-Seg-ARM-E/pths/model_maxmIOU75.pth
+    # Trained with use_sbg=True, use_variance=True, use_semantic=True, semantic_source='hr'
+    # (confirmed from its training log). semantic_source='hr' is REQUIRED here -- it builds
+    # sbg_sem_head; omitting it (lr default) makes the checkpoint's sbg_sem_head.* keys
+    # 'unexpected' and the load guard raises loudly (by design, not silently).
+
+    evaluatev0('./checkpoints/train_STDC2-Seg-ARM-E/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75,
+        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False,
+        use_sbg=True, use_variance=True, use_semantic=True, semantic_source='hr')
     run_boundary_eval(
-        checkpoint_path='./checkpoints/train_STDC2-Seg-ARM-D/pths/model_maxmIOU75.pth',
+        checkpoint_path='./checkpoints/train_STDC2-Seg-ARM-E/pths/model_maxmIOU75.pth',
         backbone='STDCNet1446',
-        use_sbg=True, use_variance=True, use_semantic=True)
+        use_sbg=True, use_variance=True, use_semantic=True, semantic_source='hr')
+
 
     
 
