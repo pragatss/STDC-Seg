@@ -221,8 +221,79 @@ class FeatureFusionModule(nn.Module):
         return wd_params, nowd_params
 
 
+class CtxGCN(nn.Module):
+    """Boundary-gated 1-hop message passing that refines the CONTEXT feature
+    (feat_cp8). The detail path (feat_res8) is never touched. At init the
+    residual scale is 0, so the module is exactly the baseline and must earn
+    any deviation. `gate` selects the ablation arm:
+        'uniform'  -> Arm B (no gate, plain smoothing)
+        'boundary' -> Arm C (fixed boundary-affinity gate)
+        'learned'  -> Arm D (learned per-edge gate, DrGNN-style)
+        'shuffle'  -> Arm E (falsification control)
+    """
+    def __init__(self, chan=128, gate='boundary', *args, **kwargs):
+        super(CtxGCN, self).__init__()
+        self.gate = gate
+        self.msg = ConvBNReLU(chan, chan, ks=1, stride=1, padding=0)
+        if gate == 'learned':
+            self.router = nn.Conv2d(2 * chan + 2, 1, kernel_size=1, bias=True)
+        self.res_scale = nn.Parameter(torch.zeros(1))
+        self.offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        self.init_weight()
+
+    def _shift(self, x, dy, dx):
+        return torch.roll(x, shifts=(dy, dx), dims=(2, 3))
+
+    def forward(self, h, bmap):
+        # h: [N, chan, H, W] context ; bmap: [N, 1, H, W] boundary logits
+        b = torch.sigmoid(bmap)
+        msg = self.msg(h)
+        num = h.clone()
+        den = torch.ones_like(b)
+        for (dy, dx) in self.offsets:
+            hj = self._shift(msg, dy, dx)
+            bj = self._shift(b, dy, dx)
+            if self.gate == 'uniform':
+                a = torch.ones_like(b)
+            elif self.gate == 'boundary':
+                a = (1 - b) * (1 - bj)
+            elif self.gate == 'shuffle':
+                a = (1 - b) * (1 - bj)
+                idx = torch.randperm(a[0, 0].numel(), device=a.device)
+                a = a.view(a.size(0), 1, -1)[:, :, idx].view_as(b)
+            elif self.gate == 'learned':
+                hj_raw = self._shift(h, dy, dx)
+                edge = torch.cat([h, hj_raw, b, bj], dim=1)
+                a = torch.sigmoid(self.router(edge))
+            else:
+                raise ValueError("unknown gate: %s" % self.gate)
+            num = num + a * hj
+            den = den + a
+        avg = num / (den + 1e-4)
+        return h + self.res_scale * (avg - h)
+
+    def init_weight(self):
+        for ly in self.children():
+            if isinstance(ly, nn.Conv2d):
+                nn.init.kaiming_normal_(ly.weight, a=1)
+                if ly.bias is not None:
+                    nn.init.constant_(ly.bias, 0)
+
+    def get_params(self):
+        wd_params, nowd_params = [], []
+        for name, module in self.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                wd_params.append(module.weight)
+                if module.bias is not None:
+                    nowd_params.append(module.bias)
+            elif isinstance(module, BatchNorm2d):
+                nowd_params += list(module.parameters())
+        nowd_params.append(self.res_scale)   # CRITICAL: bare Parameter, else frozen
+        return wd_params, nowd_params
+
+
 class BiSeNet(nn.Module):
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, heat_map=False, use_ctx_gcn=False, gcn_gate='boundary', *args, **kwargs):
         super(BiSeNet, self).__init__()
         
         self.use_boundary_2 = use_boundary_2
@@ -255,6 +326,10 @@ class BiSeNet(nn.Module):
             exit(0)
 
         self.ffm = FeatureFusionModule(inplane, 256)
+        self.use_ctx_gcn = use_ctx_gcn
+        if use_ctx_gcn:
+            self.ctx_gcn = CtxGCN(chan=conv_out_inplanes, gate=gcn_gate) 
+                   
         self.conv_out = BiSeNetOutput(256, 256, n_classes)
         self.conv_out16 = BiSeNetOutput(conv_out_inplanes, 64, n_classes)
         self.conv_out32 = BiSeNetOutput(conv_out_inplanes, 64, n_classes)
@@ -279,7 +354,10 @@ class BiSeNet(nn.Module):
 
         feat_out_sp16 = self.conv_out_sp16(feat_res16)
 
-        feat_fuse = self.ffm(feat_res8, feat_cp8)
+        feat_cp8_ref = feat_cp8
+        if self.use_ctx_gcn:
+            feat_cp8_ref = self.ctx_gcn(feat_cp8, feat_out_sp8)
+        feat_fuse = self.ffm(feat_res8, feat_cp8_ref)
 
         feat_out = self.conv_out(feat_fuse)
         feat_out16 = self.conv_out16(feat_cp8)

@@ -63,7 +63,7 @@ class MscEvalV0(object):
         miou = ious.mean()
         return miou.item()
 
-def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False):
+def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, use_ctx_gcn=False, gcn_gate='boundary'):
     print('scale', scale)
     print('use_boundary_2', use_boundary_2)
     print('use_boundary_4', use_boundary_4)
@@ -84,7 +84,8 @@ def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', sc
     net = BiSeNet(backbone=backbone, n_classes=n_classes,
      use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, 
      use_boundary_8=use_boundary_8, use_boundary_16=use_boundary_16, 
-     use_conv_last=use_conv_last)
+     use_conv_last=use_conv_last, use_ctx_gcn=use_ctx_gcn, gcn_gate=gcn_gate)
+    
     net.load_state_dict(torch.load(respth))
     net.cuda()
     net.eval()
@@ -274,8 +275,11 @@ if __name__ == "__main__":
     # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
 
     #STDC2-Seg75 mIoU 0.7704
-    evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
-    use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
+    # evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
+    # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
 
    
 
+    evaluatev0('./checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
+        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False, 
+        use_ctx_gcn=True, gcn_gate='boundary')

@@ -136,6 +136,18 @@ def parse_args():
             type = str2bool,
             default = False,
             )
+    parse.add_argument(
+            '--use_ctx_gcn',
+            dest = 'use_ctx_gcn',
+            type = str2bool,
+            default = False,
+            )
+    parse.add_argument(
+            '--gcn_gate',
+            dest = 'gcn_gate',
+            type = str,
+            default = 'boundary',
+            )
     return parse.parse_args()
 
 
@@ -208,7 +220,8 @@ def train():
     ignore_idx = 255
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
-    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last)
+    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last, 
+    use_ctx_gcn=args.use_ctx_gcn, gcn_gate=args.gcn_gate)
 
     if not args.ckpt is None:
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
