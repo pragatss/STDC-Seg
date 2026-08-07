@@ -1,285 +1,125 @@
 #!/usr/bin/python
 # -*- encoding: utf-8 -*-
+"""
+Boundary-region IoU evaluator for STDC-Seg.
 
-from logger import setup_logger
+Scores per-class IoU restricted to pixels within radius r of a ground-truth
+class boundary (r=1 and r=3), plus full-image mIoU as a guard. This is the
+metric the whole project treats as primary; the stock evaluation.py reports
+only full-image mIoU, which dilutes boundary effects.
+
+Usage: edit the calls at the bottom to point at your checkpoints, then
+    python boundary_eval.py
+Score the baseline and the GCN checkpoint the SAME way and compare.
+"""
 from models.model_stages import BiSeNet
 from cityscapes import CityScapes
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import torch.nn.functional as F
-import torch.distributed as dist
-
-import os
-import os.path as osp
-import logging
-import time
+from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
-import math
 
-class MscEvalV0(object):
+CLASS_NAMES = ['road','sidewalk','building','wall','fence','pole','tlight',
+               'tsign','veg','terrain','sky','person','rider','car','truck',
+               'bus','train','moto','bicycle']
+THIN = [5, 6, 7, 12, 17, 18]   # pole, tlight, tsign, rider, moto, bicycle
 
-    def __init__(self, scale=0.5, ignore_label=255):
-        self.ignore_label = ignore_label
-        self.scale = scale
 
-    def __call__(self, net, dl, n_classes):
-        ## evaluate
-        hist = torch.zeros(n_classes, n_classes).cuda().detach()
-        if dist.is_initialized() and dist.get_rank() != 0:
-            diter = enumerate(dl)
-        else:
-            diter = enumerate(tqdm(dl))
-        for i, (imgs, label) in diter:
+def gt_boundary(label, ignore=255):
+    """label: [N,H,W] long -> [N,H,W] float in {0,1}, 1 where a valid class
+    boundary exists (no edge-wrap artifacts)."""
+    N, H, W = label.shape
+    bnd = torch.zeros((N, H, W), device=label.device)
+    # horizontal neighbours
+    diff = label[:, :, 1:] != label[:, :, :-1]
+    valid = (label[:, :, 1:] != ignore) & (label[:, :, :-1] != ignore)
+    e = (diff & valid).float()
+    bnd[:, :, 1:] = torch.maximum(bnd[:, :, 1:], e)
+    bnd[:, :, :-1] = torch.maximum(bnd[:, :, :-1], e)
+    # vertical neighbours
+    diff = label[:, 1:, :] != label[:, :-1, :]
+    valid = (label[:, 1:, :] != ignore) & (label[:, :-1, :] != ignore)
+    e = (diff & valid).float()
+    bnd[:, 1:, :] = torch.maximum(bnd[:, 1:, :], e)
+    bnd[:, :-1, :] = torch.maximum(bnd[:, :-1, :], e)
+    return bnd
 
-            N, _, H, W = label.shape
 
-            label = label.squeeze(1).cuda()
-            size = label.size()[-2:]
+def dilate(bnd, r):
+    """Dilate a {0,1} map by radius r via max-pool. bnd:[N,H,W] -> [N,H,W] bool."""
+    k = 2 * r + 1
+    d = F.max_pool2d(bnd.unsqueeze(1), kernel_size=k, stride=1, padding=r)
+    return d.squeeze(1) > 0.5
 
-            imgs = imgs.cuda()
 
-            N, C, H, W = imgs.size()
-            new_hw = [int(H*self.scale), int(W*self.scale)]
-
-            imgs = F.interpolate(imgs, new_hw, mode='bilinear', align_corners=True)
-
-            logits = net(imgs)[0]
-  
-            logits = F.interpolate(logits, size=size,
-                    mode='bilinear', align_corners=True)
-            probs = torch.softmax(logits, dim=1)
-            preds = torch.argmax(probs, dim=1)
-            keep = label != self.ignore_label
-            hist += torch.bincount(
-                label[keep] * n_classes + preds[keep],
-                minlength=n_classes ** 2
-                ).view(n_classes, n_classes).float()
-        if dist.is_initialized():
-            dist.all_reduce(hist, dist.ReduceOp.SUM)
-        ious = hist.diag() / (hist.sum(dim=0) + hist.sum(dim=1) - hist.diag())
-        miou = ious.mean()
-        return miou.item()
-
-def evaluatev0(respth='./pretrained', dspth='./data', backbone='CatNetSmall', scale=0.75, use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, use_conv_last=False, use_ctx_gcn=False, gcn_gate='boundary'):
-    print('scale', scale)
-    print('use_boundary_2', use_boundary_2)
-    print('use_boundary_4', use_boundary_4)
-    print('use_boundary_8', use_boundary_8)
-    print('use_boundary_16', use_boundary_16)
-    ## dataset
-    batchsize = 5
-    n_workers = 2
+@torch.no_grad()
+def evaluate_boundary(respth, dspth='./data', backbone='STDCNet1446', scale=0.75,
+                      use_boundary_8=True, use_ctx_gcn=False, gcn_gate='boundary',
+                      radii=(1, 3), n_classes=19, ignore=255):
     dsval = CityScapes(dspth, mode='val')
-    dl = DataLoader(dsval,
-                    batch_size = batchsize,
-                    shuffle = False,
-                    num_workers = n_workers,
-                    drop_last = False)
+    dl = DataLoader(dsval, batch_size=5, shuffle=False, num_workers=2, drop_last=False)
 
-    n_classes = 19
-    print("backbone:", backbone)
     net = BiSeNet(backbone=backbone, n_classes=n_classes,
-     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, 
-     use_boundary_8=use_boundary_8, use_boundary_16=use_boundary_16, 
-     use_conv_last=use_conv_last, use_ctx_gcn=use_ctx_gcn, gcn_gate=gcn_gate)
-    
+                  use_boundary_2=False, use_boundary_4=False,
+                  use_boundary_8=use_boundary_8, use_boundary_16=False,
+                  use_conv_last=False, use_ctx_gcn=use_ctx_gcn, gcn_gate=gcn_gate)
     net.load_state_dict(torch.load(respth))
-    net.cuda()
-    net.eval()
-    
+    net.cuda().eval()
 
-    with torch.no_grad():
-        single_scale = MscEvalV0(scale=scale)
-        mIOU = single_scale(net, dl, 19)
-    logger = logging.getLogger()
-    logger.info('mIOU is: %s\n', mIOU)
+    # per-radius intersection/union accumulators, plus full-image
+    I = {r: torch.zeros(n_classes).cuda() for r in radii}
+    U = {r: torch.zeros(n_classes).cuda() for r in radii}
+    If = torch.zeros(n_classes).cuda(); Uf = torch.zeros(n_classes).cuda()
 
-class MscEval(object):
-    def __init__(self,
-            model,
-            dataloader,
-            scales = [0.5, 0.75, 1, 1.25, 1.5, 1.75],
-            n_classes = 19,
-            lb_ignore = 255,
-            cropsize = 1024,
-            flip = True,
-            *args, **kwargs):
-        self.scales = scales
-        self.n_classes = n_classes
-        self.lb_ignore = lb_ignore
-        self.flip = flip
-        self.cropsize = cropsize
-        ## dataloader
-        self.dl = dataloader
-        self.net = model
+    for imgs, label in tqdm(dl):
+        label = label.squeeze(1).cuda()               # [N,H,W]
+        size = label.shape[-2:]
+        imgs = imgs.cuda()
+        N, C, H, W = imgs.size()
+        new_hw = [int(H * scale), int(W * scale)]
+        im = F.interpolate(imgs, new_hw, mode='bilinear', align_corners=True)
+        logits = net(im)[0]
+        logits = F.interpolate(logits, size=size, mode='bilinear', align_corners=True)
+        pred = torch.argmax(logits, dim=1)            # [N,H,W]
 
+        valid = label != ignore
+        bnd = gt_boundary(label, ignore)
+        for r in radii:
+            band = dilate(bnd, r) & valid
+            for c in range(n_classes):
+                pc = (pred == c) & band
+                gc = (label == c) & band
+                I[r][c] += (pc & gc).sum()
+                U[r][c] += (pc | gc).sum()
+        for c in range(n_classes):                    # full-image guard
+            pc = (pred == c) & valid
+            gc = (label == c) & valid
+            If[c] += (pc & gc).sum()
+            Uf[c] += (pc | gc).sum()
 
-    def pad_tensor(self, inten, size):
-        N, C, H, W = inten.size()
-        outten = torch.zeros(N, C, size[0], size[1]).cuda()
-        outten.requires_grad = False
-        margin_h, margin_w = size[0]-H, size[1]-W
-        hst, hed = margin_h//2, margin_h//2+H
-        wst, wed = margin_w//2, margin_w//2+W
-        outten[:, :, hst:hed, wst:wed] = inten
-        return outten, [hst, hed, wst, wed]
+    def miou(I, U):
+        iou = I / (U + 1e-6)
+        present = U > 0
+        return iou, iou[present].mean().item()
 
-
-    def eval_chip(self, crop):
-        with torch.no_grad():
-            out = self.net(crop)[0]
-            prob = F.softmax(out, 1)
-            if self.flip:
-                crop = torch.flip(crop, dims=(3,))
-                out = self.net(crop)[0]
-                out = torch.flip(out, dims=(3,))
-                prob += F.softmax(out, 1)
-            prob = torch.exp(prob)
-        return prob
-
-
-    def crop_eval(self, im):
-        cropsize = self.cropsize
-        stride_rate = 5/6.
-        N, C, H, W = im.size()
-        long_size, short_size = (H,W) if H>W else (W,H)
-        if long_size < cropsize:
-            im, indices = self.pad_tensor(im, (cropsize, cropsize))
-            prob = self.eval_chip(im)
-            prob = prob[:, :, indices[0]:indices[1], indices[2]:indices[3]]
-        else:
-            stride = math.ceil(cropsize*stride_rate)
-            if short_size < cropsize:
-                if H < W:
-                    im, indices = self.pad_tensor(im, (cropsize, W))
-                else:
-                    im, indices = self.pad_tensor(im, (H, cropsize))
-            N, C, H, W = im.size()
-            n_x = math.ceil((W-cropsize)/stride)+1
-            n_y = math.ceil((H-cropsize)/stride)+1
-            prob = torch.zeros(N, self.n_classes, H, W).cuda()
-            prob.requires_grad = False
-            for iy in range(n_y):
-                for ix in range(n_x):
-                    hed, wed = min(H, stride*iy+cropsize), min(W, stride*ix+cropsize)
-                    hst, wst = hed-cropsize, wed-cropsize
-                    chip = im[:, :, hst:hed, wst:wed]
-                    prob_chip = self.eval_chip(chip)
-                    prob[:, :, hst:hed, wst:wed] += prob_chip
-            if short_size < cropsize:
-                prob = prob[:, :, indices[0]:indices[1], indices[2]:indices[3]]
-        return prob
-
-
-    def scale_crop_eval(self, im, scale):
-        N, C, H, W = im.size()
-        new_hw = [int(H*scale), int(W*scale)]
-        im = F.interpolate(im, new_hw, mode='bilinear', align_corners=True)
-        prob = self.crop_eval(im)
-        prob = F.interpolate(prob, (H, W), mode='bilinear', align_corners=True)
-        return prob
-
-
-    def compute_hist(self, pred, lb):
-        n_classes = self.n_classes
-        ignore_idx = self.lb_ignore
-        keep = np.logical_not(lb==ignore_idx)
-        merge = pred[keep] * n_classes + lb[keep]
-        hist = np.bincount(merge, minlength=n_classes**2)
-        hist = hist.reshape((n_classes, n_classes))
-        return hist
-
-
-    def evaluate(self):
-        ## evaluate
-        n_classes = self.n_classes
-        hist = np.zeros((n_classes, n_classes), dtype=np.float32)
-        dloader = tqdm(self.dl)
-        if dist.is_initialized() and not dist.get_rank()==0:
-            dloader = self.dl
-        for i, (imgs, label) in enumerate(dloader):
-            N, _, H, W = label.shape
-            probs = torch.zeros((N, self.n_classes, H, W))
-            probs.requires_grad = False
-            imgs = imgs.cuda()
-            for sc in self.scales:
-                # prob = self.scale_crop_eval(imgs, sc)
-                prob = self.eval_chip(imgs)
-                probs += prob.detach().cpu()
-            probs = probs.data.numpy()
-            preds = np.argmax(probs, axis=1)
-
-            hist_once = self.compute_hist(preds, label.data.numpy().squeeze(1))
-            hist = hist + hist_once
-        IOUs = np.diag(hist) / (np.sum(hist, axis=0)+np.sum(hist, axis=1)-np.diag(hist))
-        mIOU = np.mean(IOUs)
-        return mIOU
-
-
-def evaluate(respth='./resv1_catnet/pths/', dspth='./data'):
-    ## logger
-    logger = logging.getLogger()
-
-    ## model
-    logger.info('\n')
-    logger.info('===='*20)
-    logger.info('evaluating the model ...\n')
-    logger.info('setup and restore model')
-    n_classes = 19
-    net = BiSeNet(n_classes=n_classes)
-
-    net.load_state_dict(torch.load(respth))
-    net.cuda()
-    net.eval()
-
-    ## dataset
-    batchsize = 5
-    n_workers = 2
-    dsval = CityScapes(dspth, mode='val')
-    dl = DataLoader(dsval,
-                    batch_size = batchsize,
-                    shuffle = False,
-                    num_workers = n_workers,
-                    drop_last = False)
-
-    ## evaluator
-    logger.info('compute the mIOU')
-    evaluator = MscEval(net, dl, scales=[1], flip = False)
-
-    ## eval
-    mIOU = evaluator.evaluate()
-    logger.info('mIOU is: {:.6f}'.format(mIOU))
-
+    print("\n==== %s ====" % respth)
+    fi, fm = miou(If, Uf)
+    print("full-image mIoU: %.4f" % fm)
+    for r in radii:
+        iou, m = miou(I[r], U[r])
+        print("boundary r=%d mIoU: %.4f" % (r, m))
+        thin = iou[THIN].mean().item()
+        print("   thin-class r=%d mIoU: %.4f  (%s)" % (
+            r, thin, ", ".join("%s %.3f" % (CLASS_NAMES[c], iou[c].item()) for c in THIN)))
+    return fm
 
 
 if __name__ == "__main__":
-    log_dir = 'evaluation_logs/'
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    setup_logger(log_dir)
-    
-    #STDC1-Seg50 mIoU 0.7222
-    # evaluatev0('./checkpoints/STDC1-Seg/model_maxmIOU50.pth', dspth='./data', backbone='STDCNet813', scale=0.5, 
-    # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
-
-    #STDC1-Seg75 mIoU 0.7450
-    # evaluatev0('./checkpoints/STDC1-Seg/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet813', scale=0.75, 
-    # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
-
-
-    #STDC2-Seg50 mIoU 0.7424
-    # evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU50.pth', dspth='./data', backbone='STDCNet1446', scale=0.5, 
-    # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
-
-    #STDC2-Seg75 mIoU 0.7704
-    # evaluatev0('./checkpoints/STDC2-Seg/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
-    # use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False)
-
-   
-
-    evaluatev0('./checkpoints/train_STDC2-Seg/pths/model_maxmIOU75.pth', dspth='./data', backbone='STDCNet1446', scale=0.75, 
-        use_boundary_2=False, use_boundary_4=False, use_boundary_8=True, use_boundary_16=False, 
-        use_ctx_gcn=True, gcn_gate='boundary')
+    # ---- edit these two paths, run both, compare ----
+    evaluate_boundary('./checkpoints/train_STDC2-Seg-Baseline/pths/model_maxmIOU75.pth',
+                      use_ctx_gcn=False)
+    evaluate_boundary('./checkpoints/train_STDC2-Seg-GCN/pths/model_maxmIOU75.pth',
+                      use_ctx_gcn=True, gcn_gate='boundary')
