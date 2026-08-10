@@ -3,7 +3,7 @@
 from logger import setup_logger
 from models.model_stages import BiSeNet
 from cityscapes import CityScapes
-from loss.loss import OhemCELoss
+from loss.loss import OhemCELoss, BoundaryOhemCELoss
 from loss.detail_loss import DetailAggregateLoss
 from evaluation import MscEvalV0
 from optimizer_loss import Optimizer
@@ -136,6 +136,10 @@ def parse_args():
             type = str2bool,
             default = False,
             )
+    parse.add_argument('--use_brh',     dest='use_brh',     type=str2bool, default=False)
+    parse.add_argument('--brh_mid',     dest='brh_mid',     type=int,      default=64)
+    parse.add_argument('--bnd_radius',  dest='bnd_radius',  type=int,      default=3)
+    parse.add_argument('--bnd_weight',  dest='bnd_weight',  type=float,    default=1.0)
     return parse.parse_args()
 
 
@@ -208,7 +212,8 @@ def train():
     ignore_idx = 255
     net = BiSeNet(backbone=args.backbone, n_classes=n_classes, pretrain_model=args.pretrain_path, 
     use_boundary_2=use_boundary_2, use_boundary_4=use_boundary_4, use_boundary_8=use_boundary_8, 
-    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last)
+    use_boundary_16=use_boundary_16, use_conv_last=args.use_conv_last,
+    use_brh=args.use_brh, brh_mid=args.brh_mid)
 
     if not args.ckpt is None:
         net.load_state_dict(torch.load(args.ckpt, map_location='cpu'))
@@ -222,7 +227,9 @@ def train():
 
     score_thres = 0.7
     n_min = n_img_per_gpu*cropsize[0]*cropsize[1]//16
-    criteria_p = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
+
+    criteria_p = BoundaryOhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx,
+                                    radius=args.bnd_radius, w_bnd=args.bnd_weight)
     criteria_16 = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
     criteria_32 = OhemCELoss(thresh=score_thres, n_min=n_min, ignore_lb=ignore_idx)
     boundary_loss_func = DetailAggregateLoss()

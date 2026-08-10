@@ -27,6 +27,51 @@ class OhemCELoss(nn.Module):
             loss = loss[:self.n_min]
         return torch.mean(loss)
 
+def boundary_weight_map(labels, radius=3, w_bnd=3.0, ignore_lb=255):
+    """1.0 everywhere, w_bnd within `radius` px of a GT class boundary."""
+    lab = labels
+    N, H, W = lab.shape
+    bnd = torch.zeros((N, H, W), device=lab.device)
+    d = lab[:,:,1:] != lab[:,:,:-1]
+    v = (lab[:,:,1:] != ignore_lb) & (lab[:,:,:-1] != ignore_lb)
+    e = (d & v).float()
+    # torch.maximum doesn't exist in torch 1.1.0 (required here for the InPlaceABNSync
+    # CUDA extension to build) -- torch.max(a, b) is the elementwise-max equivalent.
+    bnd[:,:,1:]  = torch.max(bnd[:,:,1:],  e)
+    bnd[:,:,:-1] = torch.max(bnd[:,:,:-1], e)
+    d = lab[:,1:,:] != lab[:,:-1,:]
+    v = (lab[:,1:,:] != ignore_lb) & (lab[:,:-1,:] != ignore_lb)
+    e = (d & v).float()
+    bnd[:,1:,:]  = torch.max(bnd[:,1:,:],  e)
+    bnd[:,:-1,:] = torch.max(bnd[:,:-1,:], e)
+    k = 2 * radius + 1
+    band = F.max_pool2d(bnd.unsqueeze(1), kernel_size=k, stride=1, padding=radius).squeeze(1)
+    return 1.0 + (w_bnd - 1.0) * (band > 0.5).float()
+
+
+class BoundaryOhemCELoss(nn.Module):
+    """OHEM cross-entropy that upweights pixels near GT boundaries.
+       w_bnd=1.0 reproduces stock OhemCELoss exactly."""
+    def __init__(self, thresh, n_min, ignore_lb=255, radius=3, w_bnd=3.0, *args, **kwargs):
+        super(BoundaryOhemCELoss, self).__init__()
+        self.thresh = -torch.log(torch.tensor(thresh, dtype=torch.float)).cuda()
+        self.n_min = n_min
+        self.ignore_lb = ignore_lb
+        self.radius = radius
+        self.w_bnd = w_bnd
+        self.criteria = nn.CrossEntropyLoss(ignore_index=ignore_lb, reduction='none')
+
+    def forward(self, logits, labels):
+        loss = self.criteria(logits, labels)                       # [N,H,W]
+        w = boundary_weight_map(labels, self.radius, self.w_bnd, self.ignore_lb)
+        loss = (loss * w).view(-1)
+        loss, _ = torch.sort(loss, descending=True)
+        if loss[self.n_min] > self.thresh:
+            loss = loss[loss > self.thresh]
+        else:
+            loss = loss[:self.n_min]
+        return torch.mean(loss)
+
 class WeightedOhemCELoss(nn.Module):
     def __init__(self, thresh, n_min, num_classes, ignore_lb=255, *args, **kwargs):
         super(WeightedOhemCELoss, self).__init__()

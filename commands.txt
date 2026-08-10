@@ -1,0 +1,50 @@
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch \
+--nproc_per_node=1 train.py \
+--respath checkpoints/train_STDC2-Seg-I0/ \
+--backbone STDCNet1446 \
+--mode train \
+--n_workers_train 12 \
+--n_workers_val 1 \
+--max_iter 60000 \
+--use_boundary_8 True \
+--pretrain_path checkpoints/STDCNet1446_76.47.tar \
+--bnd_weight 1.0
+
+evaluating the model ...
+setup and restore model
+compute the mIOU
+100%|████████████████████████████████████████████████████████████████████████████████| 250/250 [01:19<00:00,  3.16it/s]
+100%|████████████████████████████████████████████████████████████████████████████████| 250/250 [01:20<00:00,  3.11it/s]
+training iteration 60000, model saved to: checkpoints/train_STDC2-Seg-I0/pths/model_iter60000_mIOU50_0.723_mIOU75_0.7632.pth
+mIOU50 is: 0.7229800224304199, mIOU75 is: 0.7631715536117554
+maxmIOU50 is: 0.7236238121986389, maxmIOU75 is: 0.7634977102279663.
+training done, model saved to: checkpoints/train_STDC2-Seg-I0/pths/model_final.pth
+epoch:  324
+
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch \
+--nproc_per_node=1 train.py \
+--respath checkpoints/train_STDC2-Seg-I0/ \
+--backbone STDCNet1446 \
+--mode train \
+--n_workers_train 12 \
+--n_workers_val 1 \
+--max_iter 60000 \
+--use_boundary_8 True \
+--pretrain_path checkpoints/STDCNet1446_76.47.tar \
+--bnd_weight 3.0
+
+
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch \
+--nproc_per_node=1 train.py \
+--respath checkpoints/train_STDC2-Seg-I1/ \
+--backbone STDCNet1446 \
+--mode train \
+--n_workers_train 12 \
+--n_workers_val 1 \
+--max_iter 60000 \
+--use_boundary_8 True \
+--pretrain_path checkpoints/STDCNet1446_76.47.tar \
+--bnd_weight 3.0
