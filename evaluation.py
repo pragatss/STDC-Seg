@@ -24,6 +24,7 @@ from cityscapes import CityScapes
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -31,6 +32,45 @@ CLASS_NAMES = ['road', 'sidewalk', 'building', 'wall', 'fence', 'pole', 'tlight'
                'tsign', 'veg', 'terrain', 'sky', 'person', 'rider', 'car', 'truck',
                'bus', 'train', 'moto', 'bicycle']
 THIN = [5, 6, 7, 12, 17, 18]   # pole, tlight, tsign, rider, moto, bicycle
+
+
+class MscEvalV0(object):
+    # Periodic whole-image mIoU used by train.py for checkpoint selection
+    # (model_maxmIOU50.pth / model_maxmIOU75.pth). Unrelated to the boundary-region
+    # comparison tooling below -- kept here only because train.py imports it from
+    # this module.
+    def __init__(self, scale=0.5, ignore_label=255):
+        self.ignore_label = ignore_label
+        self.scale = scale
+
+    def __call__(self, net, dl, n_classes):
+        hist = torch.zeros(n_classes, n_classes).cuda().detach()
+        if dist.is_initialized() and dist.get_rank() != 0:
+            diter = enumerate(dl)
+        else:
+            diter = enumerate(tqdm(dl))
+        for i, (imgs, label) in diter:
+            N, _, H, W = label.shape
+            label = label.squeeze(1).cuda()
+            size = label.size()[-2:]
+            imgs = imgs.cuda()
+            N, C, H, W = imgs.size()
+            new_hw = [int(H*self.scale), int(W*self.scale)]
+            imgs = F.interpolate(imgs, new_hw, mode='bilinear', align_corners=True)
+            logits = net(imgs)[0]
+            logits = F.interpolate(logits, size=size, mode='bilinear', align_corners=True)
+            probs = torch.softmax(logits, dim=1)
+            preds = torch.argmax(probs, dim=1)
+            keep = label != self.ignore_label
+            hist += torch.bincount(
+                label[keep] * n_classes + preds[keep],
+                minlength=n_classes ** 2
+                ).view(n_classes, n_classes).float()
+        if dist.is_initialized():
+            dist.all_reduce(hist, dist.ReduceOp.SUM)
+        ious = hist.diag() / (hist.sum(dim=0) + hist.sum(dim=1) - hist.diag())
+        miou = ious.mean()
+        return miou.item()
 
 
 def gt_boundary(label, ignore=255):
@@ -186,9 +226,9 @@ if __name__ == "__main__":
          "./checkpoints/train_STDC2-Seg-I0/pths/model_maxmIOU75.pth",
          dict(use_brh=False)),
 
-        # ("I1 lambda=3",
-        #  "./checkpoints/train_STDC2-Seg-I1/pths/model_maxmIOU75.pth",
-        #  dict(use_brh=False)),
+        ("I1 lambda=3",
+         "./checkpoints/train_STDC2-Seg-I1/pths/model_maxmIOU75.pth",
+         dict(use_brh=False)),
 
         # ("H1 stride-4 refine",
         #  "./checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth",

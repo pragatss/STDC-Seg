@@ -1,3 +1,5 @@
+CUDA_VISIBLE_DEVICES=0 python evaluation.py
+
 export CUDA_VISIBLE_DEVICES=0
 PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch \
 --nproc_per_node=1 train.py \
@@ -36,15 +38,48 @@ PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs
 --bnd_weight 3.0
 
 
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py --respath checkpoints/train_STDC2-Seg-I1/ --backbone STDCNet1446 --mode train --n_workers_train 12 --n_workers_val 1 --max_iter 60000 --use_boundary_8 True --pretrain_path checkpoints/STDCNet1446_76.47.tar --bnd_weight 3.0
+it: 60000/60000, lr: 0.000001, loss: 4.3039, boundery_bce_loss: 0.0947, boundery_dice_loss: 0.6611, eta: 0:00:02, time: 123.2769
+evaluating the model ...
+setup and restore model
+compute the mIOU
+100%|████████████████████████████████████████████████████████████████████████████████| 250/250 [01:18<00:00,  3.18it/s]
+100%|████████████████████████████████████████████████████████████████████████████████| 250/250 [01:24<00:00,  2.95it/s]
+training iteration 60000, model saved to: checkpoints/train_STDC2-Seg-I1/pths/model_iter60000_mIOU50_0.7329_mIOU75_0.7681.pth
+mIOU50 is: 0.7329186201095581, mIOU75 is: 0.7680532336235046
+maxmIOU50 is: 0.7345163226127625, maxmIOU75 is: 0.7704243659973145.
+training done, model saved to: checkpoints/train_STDC2-Seg-I1/pths/model_final.pth
+epoch:  324
+(stdcseg18) husky@hus
+
+==========================================================================
+run                         full   bnd r=1   bnd r=3  thin r=1  thin r=3
+--------------------------------------------------------------------------
+A baseline                0.7600    0.3595    0.4513    0.3340    0.4218
+I0 lambda=1 control       0.7635    0.3583    0.4495    0.3299    0.4170
+I1 lambda=3               0.7704    0.3778    0.4768    0.3543    0.4503
+--------------------------------------------------------------------------
+  d vs A baseline        +0.0035   -0.0012   -0.0018   -0.0042   -0.0048
+  d vs A baseline        +0.0105   +0.0183   +0.0255   +0.0203   +0.0285
+==========================================================================
+Primary metric = boundary r=1 / r=3 and thin-class. full mIoU is a guard only.
+
+thin-class IoU @ r=1
+run                        pole    tlight     tsign     rider      moto   bicycle
+A baseline                0.335     0.337     0.367     0.324     0.264     0.377
+I0 lambda=1 control       0.329     0.314     0.368     0.307     0.296     0.365
+I1 lambda=3               0.376     0.361     0.403     0.347     0.275     0.364
+
+
+
+baseline v2
 export CUDA_VISIBLE_DEVICES=0
-PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch \
---nproc_per_node=1 train.py \
---respath checkpoints/train_STDC2-Seg-I1/ \
---backbone STDCNet1446 \
---mode train \
---n_workers_train 12 \
---n_workers_val 1 \
---max_iter 60000 \
---use_boundary_8 True \
---pretrain_path checkpoints/STDCNet1446_76.47.tar \
---bnd_weight 3.0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC2-Seg-Baseline2/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar
