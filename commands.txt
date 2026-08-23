@@ -122,16 +122,42 @@ epoch:  216
 
 export CUDA_VISIBLE_DEVICES=0
 PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
---respath checkpoints/train_STDC2-Seg-H1/ \
---backbone STDCNet1446 \
---mode train \
---n_workers_train 12 \
---n_workers_val 1 \
---n_img_per_gpu 16 \
---max_iter 60000 \
---use_boundary_8 True \
---pretrain_path checkpoints/STDCNet1446_76.47.tar \
---use_brh True
+  --respath checkpoints/train_STDC2-Seg-H1/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar \
+  --use_brh True
+
+ax mIOU model saved to: checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth
+mIOU50 is: 0.7281093001365662, mIOU75 is: 0.7660109996795654
+maxmIOU50 is: 0.7284583449363708, maxmIOU75 is: 0.7660109996795654.
+training done, model saved to: checkpoints/train_STDC2-Seg-H1/pths/model_final.pth
+epoch:  324
+
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC2-Seg-HI1/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar \
+  --use_brh True \
+  --bnd_weight 3.0
+
+  100%|█████████████████████████████████████████████████████████████████████| 250/250 [01:18<00:00,  3.17it/s]
+100%|█████████████████████████████████████████████████████████████████████| 250/250 [01:24<00:00,  2.94it/s]
+training iteration 60000, model saved to: checkpoints/train_STDC2-Seg-HI1/pths/model_iter60000_mIOU50_0.741_mIOU75_0.7717.pth
+mIOU50 is: 0.7409579753875732, mIOU75 is: 0.7716527581214905
+maxmIOU50 is: 0.7410442233085632, maxmIOU75 is: 0.7725001573562622.
+training done, model saved to: checkpoints/train_STDC2-Seg-HI1/pths/model_final.pth
+epoch:  324
 
 
 
