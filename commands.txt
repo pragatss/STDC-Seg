@@ -97,28 +97,6 @@ maxmIOU50 is: 0.7211108207702637, maxmIOU75 is: 0.751184344291687.
 training done, model saved to: checkpoints/train_STDC2-Seg-Baseline2/pths/model_final.pth
 epoch:  324
 
-export CUDA_VISIBLE_DEVICES=0
-PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
---backbone STDCNet1446 --use_boundary_8 True \
---pretrain_path checkpoints/STDCNet1446_76.47.tar \
---respath ./checkpoints/train_STDC2-Seg-H1 \
---use_brh True
-
-setup and restore model
-compute the mIOU
-100%|█████████████████████████████████████████████████████████████████████| 250/250 [01:33<00:00,  2.66it/s]
-100%|█████████████████████████████████████████████████████████████████████| 250/250 [01:55<00:00,  2.16it/s]
-training iteration 40000, model saved to: ./checkpoints/train_STDC2-Seg-H1/pths/model_iter40000_mIOU50_0.7254_mIOU75_0.7584.pth
-max mIOU model saved to: ./checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU50.pth
-max mIOU model saved to: ./checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth
-mIOU50 is: 0.7254425883293152, mIOU75 is: 0.7584426403045654
-maxmIOU50 is: 0.7254425883293152, maxmIOU75 is: 0.7584426403045654.
-training done, model saved to: ./checkpoints/train_STDC2-Seg-H1/pths/model_final.pth
-epoch:  216
-
-
-
-
 
 export CUDA_VISIBLE_DEVICES=0
 PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
@@ -158,6 +136,8 @@ mIOU50 is: 0.7409579753875732, mIOU75 is: 0.7716527581214905
 maxmIOU50 is: 0.7410442233085632, maxmIOU75 is: 0.7725001573562622.
 training done, model saved to: checkpoints/train_STDC2-Seg-HI1/pths/model_final.pth
 epoch:  324
+
+
 
 
 

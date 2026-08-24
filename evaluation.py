@@ -222,6 +222,10 @@ if __name__ == "__main__":
          "./checkpoints/train_STDC2-Seg-Baseline/pths/model_maxmIOU75.pth",
          dict(use_brh=False)),
 
+        ("A baseline v2",
+         "./checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth",
+         dict(use_brh=False)),
+
         ("I0 lambda=1 control",
          "./checkpoints/train_STDC2-Seg-I0/pths/model_maxmIOU75.pth",
          dict(use_brh=False)),
@@ -230,9 +234,13 @@ if __name__ == "__main__":
          "./checkpoints/train_STDC2-Seg-I1/pths/model_maxmIOU75.pth",
          dict(use_brh=False)),
 
-        # ("H1 stride-4 refine",
-        #  "./checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth",
-        #  dict(use_brh=True)),
+        ("H1 stride-4 refine",
+         "./checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth",
+         dict(use_brh=True)),
+
+        ("HI1 brh + lambda=3",
+         "./checkpoints/train_STDC2-Seg-HI1/pths/model_maxmIOU75.pth",
+         dict(use_brh=True)),
     ]
 
     report(RUNS,
