@@ -65,6 +65,38 @@ class BiSeNetOutput(nn.Module):
         return wd_params, nowd_params
 
 
+class BoundaryRefine(nn.Module):
+    def __init__(self, n_classes=19, hr_chan=64, mid=64, *args, **kwargs):
+        super(BoundaryRefine, self).__init__()
+        self.proj  = ConvBNReLU(hr_chan, mid, ks=3, stride=1, padding=1)
+        self.fuse  = ConvBNReLU(mid + n_classes, mid, ks=3, stride=1, padding=1)
+        self.delta = nn.Conv2d(mid, n_classes, kernel_size=1, bias=False)
+        self.res_scale = nn.Parameter(torch.zeros(1))
+        self.init_weight()
+
+    def forward(self, logits8, feat_hr):
+        hr = self.proj(feat_hr)
+        up = F.interpolate(logits8, feat_hr.size()[2:], mode='bilinear', align_corners=True)
+        d  = self.delta(self.fuse(torch.cat([up, hr], dim=1)))
+        return up + self.res_scale * d
+
+    def init_weight(self):
+        for ly in self.children():
+            if isinstance(ly, nn.Conv2d):
+                nn.init.kaiming_normal_(ly.weight, a=1)
+                if ly.bias is not None: nn.init.constant_(ly.bias, 0)
+
+    def get_params(self):
+        wd_params, nowd_params = [], []
+        for name, module in self.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                wd_params.append(module.weight)
+                if module.bias is not None: nowd_params.append(module.bias)
+            elif isinstance(module, BatchNorm2d):
+                nowd_params += list(module.parameters())
+        return wd_params, nowd_params
+
+
 class AttentionRefinementModule(nn.Module):
     def __init__(self, in_chan, out_chan, *args, **kwargs):
         super(AttentionRefinementModule, self).__init__()
@@ -294,9 +326,9 @@ class FeatureFusionModule(nn.Module):
 
 
 class BiSeNet(nn.Module):
-    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, input_size=512, use_conv_last=False, heat_map=False, *args, **kwargs):
+    def __init__(self, backbone, n_classes, pretrain_model='', use_boundary_2=False, use_boundary_4=False, use_boundary_8=False, use_boundary_16=False, input_size=512, use_conv_last=False, heat_map=False, use_brh=False, brh_mid=64, *args, **kwargs):
         super(BiSeNet, self).__init__()
-        
+
         self.use_boundary_2 = use_boundary_2
         self.use_boundary_4 = use_boundary_4
         self.use_boundary_8 = use_boundary_8
@@ -336,6 +368,10 @@ class BiSeNet(nn.Module):
         self.conv_out_sp4 = BiSeNetOutput(sp4_inplanes, 64, 1)
         self.conv_out_sp2 = BiSeNetOutput(sp2_inplanes, 64, 1)
 
+        self.use_brh = use_brh
+        if use_brh:
+            self.brh = BoundaryRefine(n_classes=n_classes, hr_chan=sp4_inplanes, mid=brh_mid)
+
         if self.input_size == 512:
             self.H = torch.tensor(512)
             self.W = torch.tensor(1024)
@@ -367,6 +403,8 @@ class BiSeNet(nn.Module):
         feat_fuse = self.ffm(feat_res8, feat_cp8)
 
         feat_out = self.conv_out(feat_fuse)
+        if self.use_brh:
+            feat_out = self.brh(feat_out, feat_res4)   # now at stride 4
         feat_out16 = self.conv_out16(feat_cp8)
         feat_out32 = self.conv_out32(feat_cp16)
 

@@ -93,15 +93,18 @@ def create_exp_dir(path, scripts_to_save=None):
             shutil.copyfile(script, dst_file)
 
 ########################## TensorRT speed_test #################################
-# try:
-import tensorrt as trt
-import pycuda.driver as cuda
-import pycuda.autoinit
+try:
+    import tensorrt as trt
+    import pycuda.driver as cuda
+    import pycuda.autoinit
 
-MAX_BATCH_SIZE = 1
-MAX_WORKSPACE_SIZE = 1 << 30
-TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-DTYPE = trt.float32
+    MAX_BATCH_SIZE = 1
+    MAX_WORKSPACE_SIZE = 1 << 30
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    DTYPE = trt.float32
+    _TENSORRT_AVAILABLE = True
+except ImportError:
+    _TENSORRT_AVAILABLE = False
 
 # Model
 INPUT_NAME = 'input'

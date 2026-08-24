@@ -3,6 +3,7 @@
 from logger import setup_logger
 from models.model_stages import BiSeNet
 from cityscapes import CityScapes
+from synthia import Synthia
 from loss.loss import OhemCELoss, BoundaryOhemCELoss
 from loss.detail_loss import DetailAggregateLoss
 from evaluation import MscEvalV0
@@ -83,6 +84,13 @@ def parse_args():
             default = 'train',
             )
     parse.add_argument(
+            '--dataset',
+            dest = 'dataset',
+            type = str,
+            choices = ('cityscapes', 'synthia'),
+            default = 'cityscapes',
+            )
+    parse.add_argument(
             '--ckpt',
             dest = 'ckpt',
             type = str,
@@ -147,8 +155,9 @@ def train():
     args = parse_args()
     
     save_pth_path = os.path.join(args.respath, 'pths')
-    dspth = './data'
-    
+    dspth = './data/SYNTHIA' if args.dataset == 'synthia' else './data'
+    DatasetClass = Synthia if args.dataset == 'synthia' else CityScapes
+
     # print(save_pth_path)
     # print(osp.exists(save_pth_path))
     # if not osp.exists(save_pth_path) and dist.get_rank()==0: 
@@ -189,7 +198,7 @@ def train():
         logger.info('mode: {}'.format(args.mode))
     
     
-    ds = CityScapes(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale)
+    ds = DatasetClass(dspth, cropsize=cropsize, mode=mode, randomscale=randomscale)
     sampler = torch.utils.data.distributed.DistributedSampler(ds)
     dl = DataLoader(ds,
                     batch_size = n_img_per_gpu,
@@ -199,7 +208,7 @@ def train():
                     pin_memory = False,
                     drop_last = True)
     # exit(0)
-    dsval = CityScapes(dspth, mode='val', randomscale=randomscale)
+    dsval = DatasetClass(dspth, mode='val', randomscale=randomscale)
     sampler_val = torch.utils.data.distributed.DistributedSampler(dsval)
     dlval = DataLoader(dsval,
                     batch_size = 2,
