@@ -13,6 +13,17 @@ replicate isn't on disk in this checkout), but better than treating a single
 checkpoint's eval as if it had no replicate noise. Add a third baseline
 checkpoint path below once one is available and re-run.
 
+SCALES are chosen so int(1024*scale) and int(2048*scale) are both exact
+multiples of 32 -- STDCNet1446 downsamples by 2^5=32, and Cityscapes is
+1024x2048, so a non-multiple-of-32 scale forces the stride-32 feature map to
+reassemble via a non-integer nearest-neighbor upsample ratio (ContextPath
+uses mode='nearest' for its coarsest fusion), which showed up as a
+non-monotonic boundary-IoU artifact when this sweep first used 0.80/0.85/0.90
+(non-divisible). Verified directly against the actual feat8/feat32 shapes,
+not just the arithmetic: every scale below gives ratio 8.000/32.000 exactly.
+NOTE: 0.78125 (25/32), not the truncated 0.7812 -- the truncated decimal
+lands on 799x1599, off by one on both dims and silently non-divisible again.
+
 Deterministic: CityScapes val mode has no augmentation and the DataLoader
 uses shuffle=False, so re-running this script on the same checkpoint/scale
 reproduces the same numbers -- unlike latency, there's no need for repeated
@@ -29,7 +40,7 @@ BASELINES = [
     ('B1', './checkpoints/train_STDC2-Seg-Baseline/pths/model_maxmIOU75.pth'),
     ('B2', './checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth'),
 ]
-SCALES = (0.75, 0.80, 0.85, 0.90)
+SCALES = (0.75, 0.78125, 0.8125, 0.875, 0.9375, 1.0)
 
 RUNS = []
 for rep_label, ckpt in BASELINES:

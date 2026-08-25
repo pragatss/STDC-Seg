@@ -125,14 +125,22 @@ def time_block(model, x, k):
 # affect forward-pass latency, only architecture + input shape do) so any
 # baseline checkpoint works here -- the *accuracy* sweep is what needs both
 # baseline replicates, not this one.
+## SCALES must keep int(1024*scale) and int(2048*scale) both divisible by 32
+## (STDCNet1446 downsample factor) -- see pareto_accuracy_sweep.py's
+## docstring for why: a non-divisible scale forces a non-integer
+## nearest-neighbor upsample ratio in ContextPath's coarsest fusion,
+## producing a scale-idiosyncratic accuracy artifact. Verified against
+## actual feat8/feat32 shapes for each value below.
 CONFIGS = [
-    dict(label='baseline@0.75', ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.75),
-    dict(label='baseline@0.80', ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.80),
-    dict(label='baseline@0.85', ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.85),
-    dict(label='baseline@0.90', ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.90),
-    dict(label='I1@0.75',       ckpt='../checkpoints/train_STDC2-Seg-I1/pths/model_maxmIOU75.pth',        use_brh=False, scale=0.75),
-    dict(label='H1@0.75',       ckpt='../checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth',        use_brh=True,  scale=0.75),
-    dict(label='HI1@0.75',      ckpt='../checkpoints/train_STDC2-Seg-HI1/pths/model_maxmIOU75.pth',       use_brh=True,  scale=0.75),
+    dict(label='baseline@0.75',    ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.75),
+    dict(label='baseline@0.78125', ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.78125),
+    dict(label='baseline@0.8125',  ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.8125),
+    dict(label='baseline@0.875',   ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.875),
+    dict(label='baseline@0.9375',  ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=0.9375),
+    dict(label='baseline@1.0',     ckpt='../checkpoints/train_STDC2-Seg-Baseline2/pths/model_maxmIOU75.pth', use_brh=False, scale=1.0),
+    dict(label='I1@0.75',          ckpt='../checkpoints/train_STDC2-Seg-I1/pths/model_maxmIOU75.pth',        use_brh=False, scale=0.75),
+    dict(label='H1@0.75',          ckpt='../checkpoints/train_STDC2-Seg-H1/pths/model_maxmIOU75.pth',        use_brh=True,  scale=0.75),
+    dict(label='HI1@0.75',         ckpt='../checkpoints/train_STDC2-Seg-HI1/pths/model_maxmIOU75.pth',       use_brh=True,  scale=0.75),
 ]
 
 

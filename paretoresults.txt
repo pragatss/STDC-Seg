@@ -1,0 +1,35 @@
+Plain English
+All four deliverables are done, and the good news is your Pareto claim survives the fixes — but I need to flag one important change to how you should word it, because the fix reverses part of your framing.
+
+Your divisibility diagnosis was correct. With the corrected 32-divisible scales, the baseline curve is now smoothly, monotonically increasing with scale — not the buggy non-monotonic decrease you had before. That means the story isn't "upscaling doesn't help" anymore. It genuinely does help. The claim you asked me to help word — "the latency-for-accuracy trade does not materialize" — is no longer supported by the corrected data, and I don't want to hand you wording built on the broken numbers. What does still hold, robustly, on both FLOPs and (now much cleaner) latency: your treatment arms beat what upscaling buys at matched cost. It's a genuine Pareto-dominance claim now, not a "there's nothing to trade against" claim — arguably a stronger, more standard framing for a reviewer to accept anyway.
+
+The corrected picture
+FLOPs (primary, deterministic — pareto_flops.png):
+
+GFLOPs @ scale 0.75	params	Δ vs stock
+stock / I1	99.56	16.079M	—
+H1 / HI1 (BRH)	105.89	16.166M	+6.36% FLOPs, +0.086M params
+This +6.36% is constant across every scale I tested (99.6→177.0 GFLOPs) — expected for a fully-convolutional architecture where BRH's cost scales with resolution at the same rate as everything else. Also close to your original ~7.6% wall-clock estimate, which is a reasonable cross-check (latency includes memory-bandwidth/launch overhead FLOPs doesn't, so they shouldn't match exactly).
+
+Corrected accuracy curve (bnd r=1, mean of B1/B2 replicates, monotonic now):
+
+scale	0.75	0.78125	0.8125	0.875	0.9375	1.0
+bnd r=1	0.358	0.361	0.366	0.371	0.376	0.381
+Margin over the interpolated curve at matched cost (this is the number that matters):
+
+arm	accuracy	matched-FLOPs margin	matched-latency margin
+I1	0.378	+0.0199 (at scale-0.75's own point — same architecture, so no interpolation needed)	+0.0199 (I1's latency, 77.5ms, actually landed fractionally below the cheapest curve point, 77.6ms)
+H1	0.376	+0.0153	+0.0171
+HI1	0.398	+0.0373	+0.0387
+Every margin clears the 0.0032 replicate-noise floor by 5–12×. Even against the single most expensive point I measured — native resolution, 177 GFLOPs, ~140ms, no resize distortion at all — HI1 (106 GFLOPs, ~83ms) still wins outright: 0.398 vs 0.381.
+
+Figures: pareto_flops.png (primary) and pareto_latency.png (supplementary). Both show the same qualitative picture.
+
+Suggested wording (revised from what you asked for)
+Don't use "the trade does not materialize" — that's false post-fix. Use something like:
+
+"Running the released baseline checkpoint at higher test-time resolution does improve boundary IoU (0.358 → 0.381 from 0.75× to native resolution), confirming that resolution is a real, usable knob for this architecture. However, at matched FLOPs cost, our method exceeds this upscaling curve by 0.015–0.037 boundary IoU (r=1) — including a comparison against the most expensive point we measured (native resolution, 177 GFLOPs), which HI1 still beats using 40% fewer FLOPs (106 GFLOPs). We report FLOPs as the primary cost metric since it is deterministic and reproducible; wall-clock measurements on our hardware (a thermally-limited T4) show a consistent pattern but a wider noise floor."
+
+This keeps your "I1 is Pareto-dominant by construction" point completely intact (it's the cleanest sentence in the paper — zero architecture change, zero cost, +0.020 boundary IoU, not contingent on any of this scale-sweep analysis) and reframes the BRH/HI1 story as genuine FLOPs-efficiency rather than "no free lunch exists," which is the more defensible and frankly more interesting claim to a reviewer.
+
+One honest gap to flag: still n=2 baseline replicates for the scale curve (not n=3), same limitation as before — the third replicate isn't on disk in this checkout. Doesn't change any conclusion here given the margins involved, but worth a footnote if a reviewer asks about it.
