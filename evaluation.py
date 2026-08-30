@@ -68,8 +68,12 @@ class MscEvalV0(object):
                 ).view(n_classes, n_classes).float()
         if dist.is_initialized():
             dist.all_reduce(hist, dist.ReduceOp.SUM)
-        ious = hist.diag() / (hist.sum(dim=0) + hist.sum(dim=1) - hist.diag())
-        miou = ious.mean()
+        union = hist.sum(dim=0) + hist.sum(dim=1) - hist.diag()
+        ious = hist.diag() / union
+        # classes with zero union (no GT and no prediction anywhere in the
+        # val set -- e.g. SYNTHIA's val split has none of terrain/truck/train)
+        # give 0/0 = nan, which would otherwise poison the whole mean.
+        miou = ious[union > 0].mean()
         return miou.item()
 
 
