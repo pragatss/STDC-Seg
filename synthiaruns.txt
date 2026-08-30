@@ -10,6 +10,14 @@ PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs
   --use_boundary_8 True \
   --pretrain_path checkpoints/STDCNet1446_76.47.tar
 
+  100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████| 470/470 [01:24<00:00,  5.57it/s]
+100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████| 470/470 [01:26<00:00,  5.43it/s]
+training iteration 60000, model saved to: checkpoints/train_STDC2-Seg-Synthia/pths/model_iter60000_mIOU50_0.6875_mIOU75_0.7242.pth
+mIOU50 is: 0.6874886751174927, mIOU75 is: 0.7241611480712891
+maxmIOU50 is: 0.6888402700424194, maxmIOU75 is: 0.7255874872207642.
+training done, model saved to: checkpoints/train_STDC2-Seg-Synthia/pths/model_final.pth
+epoch:  171
+
 
 
 
