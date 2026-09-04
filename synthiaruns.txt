@@ -19,6 +19,47 @@ training done, model saved to: checkpoints/train_STDC2-Seg-Synthia/pths/model_fi
 epoch:  171
 
 
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC2-Seg-Synthia-I1/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --dataset synthia \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --bnd_weight 3.0 \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar
 
+  100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████| 470/470 [01:29<00:00,  5.23it/s]
+training iteration 60000, model saved to: checkpoints/train_STDC2-Seg-Synthia-I1/pths/model_iter60000_mIOU50_0.6971_mIOU75_0.7257.pth
+mIOU50 is: 0.6970704793930054, mIOU75 is: 0.7256852388381958
+maxmIOU50 is: 0.6980022192001343, maxmIOU75 is: 0.7289716601371765.
+training done, model saved to: checkpoints/train_STDC2-Seg-Synthia-I1/pths/model_final.pth
+epoch:  171
+
+
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC2-Seg-Synthia-I1/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --dataset synthia \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --use_brh True \
+  --bnd_weight 3.0 \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar
+
+max mIOU model saved to: checkpoints/train_STDC2-Seg-Synthia-I1/pths/model_maxmIOU50.pth
+max mIOU model saved to: checkpoints/train_STDC2-Seg-Synthia-I1/pths/model_maxmIOU75.pth
+mIOU50 is: 0.7403717041015625, mIOU75 is: 0.771896243095398
+maxmIOU50 is: 0.7403717041015625, maxmIOU75 is: 0.771896243095398.
+training done, model saved to: checkpoints/train_STDC2-Seg-Synthia-I1/pths/model_final.pth
+epoch:  171
+(stdcseg18) h
 
   
