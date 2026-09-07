@@ -4,6 +4,7 @@ from logger import setup_logger
 from models.model_stages import BiSeNet
 from cityscapes import CityScapes
 from synthia import Synthia
+from rugd import RUGD
 from loss.loss import OhemCELoss, BoundaryOhemCELoss
 from loss.detail_loss import DetailAggregateLoss
 from evaluation import MscEvalV0
@@ -23,6 +24,14 @@ import datetime
 import argparse
 
 logger = logging.getLogger()
+
+## per-dataset root, loader, class count and training crop. RUGD images are
+## 688x550, so it trains on a crop that fits them rather than the cityscapes one.
+DATASETS = {
+    'cityscapes': dict(dspth='./data',         cls=CityScapes, n_classes=19, cropsize=[1024, 512]),
+    'synthia':    dict(dspth='./data/SYNTHIA', cls=Synthia,    n_classes=19, cropsize=[1024, 512]),
+    'rugd':       dict(dspth='./data/rugd',    cls=RUGD,       n_classes=24, cropsize=[640, 512]),
+}
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -87,7 +96,7 @@ def parse_args():
             '--dataset',
             dest = 'dataset',
             type = str,
-            choices = ('cityscapes', 'synthia'),
+            choices = tuple(sorted(DATASETS)),
             default = 'cityscapes',
             )
     parse.add_argument(
@@ -155,8 +164,9 @@ def train():
     args = parse_args()
     
     save_pth_path = os.path.join(args.respath, 'pths')
-    dspth = './data/SYNTHIA' if args.dataset == 'synthia' else './data'
-    DatasetClass = Synthia if args.dataset == 'synthia' else CityScapes
+    dscfg = DATASETS[args.dataset]
+    dspth = dscfg['dspth']
+    DatasetClass = dscfg['cls']
 
     # print(save_pth_path)
     # print(osp.exists(save_pth_path))
@@ -175,7 +185,7 @@ def train():
     
     setup_logger(args.respath)
     ## dataset
-    n_classes = 19
+    n_classes = dscfg['n_classes']
     n_img_per_gpu = args.n_img_per_gpu
     n_workers_train = args.n_workers_train
     n_workers_val = args.n_workers_val
@@ -185,7 +195,7 @@ def train():
     use_boundary_2 = args.use_boundary_2
     
     mode = args.mode
-    cropsize = [1024, 512]
+    cropsize = dscfg['cropsize']
     randomscale = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.375, 1.5)
 
     if dist.get_rank()==0: 

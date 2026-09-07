@@ -1,0 +1,24 @@
+# RUGD (DatasetNinja/Supervisely export in data/rugd, 24 classes, 688x550)
+# one-time: decode the Supervisely bitmap annotations into trainId label pngs
+#   python prepare_rugd.py            # writes data/rugd/{train,val,test}/label
+# 4779 train / 733 val / 1924 test images
+
+baseline (mirrors the STDC2-Seg-Synthia baseline)
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC2-Seg-RUGD/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --dataset rugd \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar
+
+  training iteration 60000, model saved to: checkpoints/train_STDC2-Seg-RUGD/pths/model_iter60000_mIOU50_0.3149_mIOU75_0.3524.pth
+mIOU50 is: 0.3149343729019165, mIOU75 is: 0.35238102078437805
+maxmIOU50 is: 0.36796748638153076, maxmIOU75 is: 0.41561228036880493.
+training done, model saved to: checkpoints/train_STDC2-Seg-RUGD/pths/model_final.pth
+
+
