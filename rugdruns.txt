@@ -22,3 +22,25 @@ maxmIOU50 is: 0.36796748638153076, maxmIOU75 is: 0.41561228036880493.
 training done, model saved to: checkpoints/train_STDC2-Seg-RUGD/pths/model_final.pth
 
 
+HI1: brh + lambda=3 (mirrors the cityscapes/synthia HI1 arm)
+# max_iter cut 60000 -> 15000: val mIoU_sup peaks at 15000 (0.5274) and decays
+# to 0.4751 by 60000 while train rises 0.6604 -> 0.7274. RUGD train is only 12
+# video recordings sampled every 5th frame, so it memorises them early.
+export CUDA_VISIBLE_DEVICES=0
+PATH="/home/husky/anaconda3/envs/stdcseg18/bin:$PATH" /home/husky/anaconda3/envs/stdcseg/bin/python -m torch.distributed.launch --nproc_per_node=1 train.py \
+  --respath checkpoints/train_STDC2-Seg-RUGD-HI1/ \
+  --backbone STDCNet1446 \
+  --mode train \
+  --dataset rugd \
+  --n_workers_train 12 \
+  --n_workers_val 1 \
+  --max_iter 60000 \
+  --use_boundary_8 True \
+  --use_brh True \
+  --bnd_weight 3.0 \
+  --pretrain_path checkpoints/STDCNet1446_76.47.tar
+
+# scoring (no retrain needed, reads existing checkpoints):
+#   python eval_rugd.py --pths checkpoints/train_STDC2-Seg-RUGD-HI1/pths/model_iter15000_*.pth \
+#     --use_brh --per_class
+# compare against the baseline at the SAME iteration, on mIoU_sup / mIoU_fw.
